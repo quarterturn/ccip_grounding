@@ -23,3 +23,7 @@ The system identifies specific characters in a large collection of face crops (e
 - **Model**: CCIP
 - **Distance Metric**: Normalized Cosine Distance (1 - Cosine Similarity).
 - **Threshold**: Uses `ccip_default_threshold()` for matching.
+
+## Milestones
+- [x] **Milestone 1**: Basic grounding functionality implemented. (Matches confirmed, though distinctions between visually similar characters like Mai and Nano require further refinement/glasses detection).
+- [ ] **Milestone 2**: Implement GPU acceleration for faster processing and iterative testing.
