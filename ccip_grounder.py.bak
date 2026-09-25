@@ -18,7 +18,7 @@ DEBUG_FILE = "/home/alex/Documents/ccip_grounding/debug_best_matches.txt"
 try:
     THRESHOLD = ccip_default_threshold()
 except Exception:
-    THRESHOLD = 0.7
+    THRESHOLD = 0.6
 
 print(f"Using Distance Threshold: {THRESHOLD}")
 
@@ -54,15 +54,12 @@ def build_anchors():
         features = []
         for img in root_imgs:
             try:
-                feat = ccip_extract_feature(img)
-                # IMPORTANT: Convert numpy array to list for JSON serialization
-                features.append(feat.tolist() if hasattr(feat, 'tolist') else feat)
+                features.append(ccip_extract_feature(img))
             except Exception as e:
                 print(f"Error extracting feature from {img}: {e}")
         
         if features:
-            # Store ALL features as lists for Nearest Neighbor matching
-            anchors["Root_Ref"] = features 
+            anchors["Root_Ref"] = np.mean(features, axis=0).tolist()
         else:
             print("CRITICAL: No features could be extracted from reference images!")
             return None
@@ -85,7 +82,7 @@ def main():
         print(f"No images found in {INPUT_DIR}!")
         return
 
-    print(f"Grounding {len(input_imgs)} images using Nearest Neighbor Cosine Distance...")
+    print(f"Grounding {len(input_imgs)} images using Normalized Cosine Distance...")
     match_count = 0
     debug_results = []
 
@@ -95,12 +92,10 @@ def main():
             best_char = None
             min_dist = float("inf")
 
-            for char_name, anchor_feats in anchors.items():
-                # Find the minimum distance to any of the reference images for this character
-                current_min_dist = min([get_cosine_distance(feat, ref_feat) for ref_feat in anchor_feats])
-                
-                if current_min_dist < min_dist:
-                    min_dist = current_min_dist
+            for char_name, anchor_feat in anchors.items():
+                dist = get_cosine_distance(feat, anchor_feat)
+                if dist < min_dist:
+                    min_dist = dist
                     best_char = char_name
             
             debug_results.append(f"{os.path.basename(img_path)} | Best: {best_char} | Dist: {min_dist:.4f}")
