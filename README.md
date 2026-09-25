@@ -1,4 +1,6 @@
 # CCIP Anime Face Grounding
+# (mirroring to github)
+
 This project implements a zero-shot identity grounding system for anime characters using the **CCIP (Contrastive Character Image Pretraining)** model via the `dghs-imgutils` library, with an optional **CLIP** attribute check to separate visually similar characters.
 
 ## Overview
