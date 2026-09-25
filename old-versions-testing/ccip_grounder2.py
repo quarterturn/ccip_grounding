@@ -7,11 +7,10 @@ All reference images are treated as one character, "Root_Ref".
 
 Pipeline per input image:
   1. Detect every person -> crop each one
-  2. CCIP difference of each crop (or its head) vs. every reference
-     (learned CCIP metric, NOT cosine)
-  3. Keep the best crop if its difference <= threshold
-  4. Optional CLIP yes/no attribute checks on that crop (head or person region)
-  5. Copy image to output/Root_Ref/ and log boxes + scores to results.jsonl
+  2. CCIP difference of each crop vs. every reference (learned metric, NOT cosine)
+  3. Assign each crop to its closest character; keep it if difference <= threshold
+  4. Optional CLIP yes/no attribute check on that crop (head or person region)
+  5. Copy image to output/<character>/ and log boxes + scores to results.jsonl
 
 Install: pip install dghs-imgutils transformers torch pillow tqdm numpy
 """
@@ -43,6 +42,7 @@ def list_images(directory, recursive):
         return []
     out = []
     if recursive:
+        #for root, _, files in os.walk(directory):
         for root, _, files in os.walk(directory):
             out += [os.path.join(root, f) for f in files
                     if os.path.splitext(f)[1].lower() in EXTS]
@@ -85,7 +85,7 @@ def person_crops(img, conf, pad, min_size):
 
 
 def head_crop(crop, pad):
-    """Best head inside a crop; returns the crop unchanged if no head is found."""
+    """Best head inside a person crop; returns the person crop if none found."""
     heads = detect_heads(crop)
     if not heads:
         return crop
@@ -95,11 +95,20 @@ def head_crop(crop, pad):
 
 
 # ---------------------------------------------------------------- references
-def build_anchors(ref_dir, cache_path, crop_refs, det_conf, pad, ccip_region):
+def build_anchors(ref_dir, cache_path, crop_refs, det_conf, pad):
     root_imgs = list_images(ref_dir, recursive=False)
     if not root_imgs:
         sys.exit(f"CRITICAL: no reference images found in the root of {ref_dir}")
     groups = {"Root_Ref": root_imgs}
+    if os.path.isdir(ref_dir):
+        for name in sorted(os.listdir(ref_dir)):
+            sub = os.path.join(ref_dir, name)
+            if os.path.isdir(sub):
+                imgs = list_images(sub, recursive=True)
+                if imgs:
+                    groups[name] = imgs
+    if not groups:
+        sys.exit(f"CRITICAL: no reference images found in {ref_dir}")
 
     cache = {}
     if os.path.exists(cache_path):
@@ -109,12 +118,12 @@ def build_anchors(ref_dir, cache_path, crop_refs, det_conf, pad, ccip_region):
         except Exception:
             cache = {}
 
-    new_cache, anchors, anchor_paths = {}, {}, {}
+    new_cache, anchors = {}, {}
     for name, paths in groups.items():
         feats = []
         for p in tqdm(paths, desc=f"ref [{name}]"):
             key = (os.path.abspath(p), os.path.getmtime(p),
-                   os.path.getsize(p), crop_refs, ccip_region)
+                   os.path.getsize(p), crop_refs)
             if key in cache:
                 feat = cache[key]
             else:
@@ -122,18 +131,15 @@ def build_anchors(ref_dir, cache_path, crop_refs, det_conf, pad, ccip_region):
                 if crop_refs:  # use the largest detected person
                     crops = person_crops(img, det_conf, pad, 0)
                     img = max(crops, key=lambda c: c[2].size[0] * c[2].size[1])[2]
-                if ccip_region == "head":
-                    img = head_crop(img, 0.25)
                 feat = np.asarray(ccip_extract_feature(img))
             new_cache[key] = feat
             feats.append(feat)
         anchors[name] = feats
-        anchor_paths[name] = paths
         print(f"  {name}: {len(feats)} reference features")
 
     with open(cache_path, "wb") as f:
         pickle.dump(new_cache, f)
-    return anchors, anchor_paths
+    return anchors
 
 
 # ---------------------------------------------------------------- CLIP
@@ -148,20 +154,24 @@ class ClipChecker:
         self.model = CLIPModel.from_pretrained(model_name).to(self.device).eval()
         self.proc = CLIPProcessor.from_pretrained(model_name)
         self.pairs = pairs
-        self.texts = [t for pair in pairs for t in pair]
 
-        # sanity check at load time so failures happen here, not mid-run
-        self.score(Image.new("RGB", (224, 224), (255, 255, 255)))
+        texts = [t for pair in pairs for t in pair]
+        with torch.no_grad():
+            tok = self.proc(text=texts, return_tensors="pt", padding=True).to(self.device)
+            tf = self.model.get_text_features(**tok)
+        self.text = tf / tf.norm(dim=-1, keepdim=True)
+        self.scale = self.model.logit_scale.exp()
 
     def score(self, crop):
         torch = self.torch
         with torch.no_grad():
-            inputs = self.proc(text=self.texts, images=crop,
-                               return_tensors="pt", padding=True).to(self.device)
-            out = self.model(**inputs)
-            logits = out.logits_per_image[0]  # shape: (2 * number_of_pairs,)
+            px = self.proc(images=crop, return_tensors="pt").to(self.device)
+            f = self.model.get_image_features(**px)
+            f = f / f.norm(dim=-1, keepdim=True)
+            logits = (self.scale * f @ self.text.T)[0]
         return [float(logits[2 * i:2 * i + 2].softmax(-1)[0])
                 for i in range(len(self.pairs))]
+
 
 def parse_pairs(raw):
     pairs = []
@@ -180,23 +190,20 @@ def main():
     ap.add_argument("--reference", default=f"{base}/reference")
     ap.add_argument("--input", default=f"{base}/input")
     ap.add_argument("--output", default=f"{base}/output")
-    ap.add_argument("--recursive", action="store_true",
-                    help="search INPUT subfolders (references are always root-only)")
+    ap.add_argument("--recursive", action="store_true", help="search input subfolders")
     ap.add_argument("--threshold", type=float, default=None,
                     help="CCIP difference threshold (lower = stricter). Default: CCIP's own.")
     ap.add_argument("--topk", type=int, default=1,
                     help="score = mean of the k closest references (1 = nearest neighbour)")
     ap.add_argument("--crop-refs", action="store_true",
                     help="crop the largest person out of each reference image")
-    ap.add_argument("--ccip-region", choices=["person", "head"], default="person",
-                    help="what CCIP compares: whole person crop or head only")
     ap.add_argument("--det-conf", type=float, default=0.3)
     ap.add_argument("--pad", type=float, default=0.1, help="padding around person boxes")
     ap.add_argument("--min-crop", type=int, default=64, help="ignore tiny detections (px)")
     ap.add_argument("--clip-pair", action="append",
-                    help='repeatable. e.g. "an anime girl wearing glasses|an anime girl"')
+                    help='repeatable. e.g. "an anime girl wearing glasses|an anime girl with no glasses"')
     ap.add_argument("--clip-min", type=float, default=0.6,
-                    help="required P(yes) for every pair (use 0 to just log scores)")
+                    help="required P(yes) for every pair")
     ap.add_argument("--clip-region", choices=["head", "person"], default="head")
     ap.add_argument("--clip-model", default="openai/clip-vit-large-patch14")
     ap.add_argument("--save-crops", action="store_true",
@@ -206,17 +213,14 @@ def main():
     os.makedirs(args.output, exist_ok=True)
     threshold = args.threshold if args.threshold is not None else float(ccip_default_threshold())
     print(f"CCIP difference threshold: {threshold:.4f}")
-    print(f"CCIP region: {args.ccip_region}")
 
-    anchors, anchor_paths = build_anchors(
-        args.reference, os.path.join(args.output, ".ref_cache.pkl"),
-        args.crop_refs, args.det_conf, args.pad, args.ccip_region)
+    anchors = build_anchors(args.reference, os.path.join(args.output, ".ref_cache.pkl"),
+                            args.crop_refs, args.det_conf, args.pad)
     char_names = list(anchors.keys())
-    ref_feats, ref_owner, ref_paths = [], [], []
+    ref_feats, ref_owner = [], []
     for ci, name in enumerate(char_names):
         ref_feats += anchors[name]
         ref_owner += [ci] * len(anchors[name])
-        ref_paths += anchor_paths[name]
     ref_owner = np.array(ref_owner)
     n_ref = len(ref_feats)
 
@@ -243,9 +247,7 @@ def main():
             try:
                 img = load_rgb(path)
                 crops = person_crops(img, args.det_conf, args.pad, args.min_crop)
-                crop_feats = [np.asarray(ccip_extract_feature(
-                    head_crop(c[2], 0.25) if args.ccip_region == "head" else c[2]))
-                    for c in crops]
+                crop_feats = [np.asarray(ccip_extract_feature(c[2])) for c in crops]
                 # learned CCIP metric; take the crops x references block
                 full = np.asarray(ccip_batch_differences(ref_feats + crop_feats))
                 diffs = full[n_ref:, :n_ref]
@@ -265,10 +267,8 @@ def main():
                     char_scores.append(float(d[:max(1, min(args.topk, len(d)))].mean()))
                 ci_best = int(np.argmin(char_scores))
                 s_best = char_scores[ci_best]
-                nearest = int(np.argmin(diffs[k]))
                 rec["crops"].append({"box": list(box), "det_score": det_score,
-                                     "best_char": char_names[ci_best], "ccip_diff": s_best,
-                                     "nearest_ref": os.path.basename(ref_paths[nearest])})
+                                     "best_char": char_names[ci_best], "ccip_diff": s_best})
                 if s_best <= threshold:
                     if ci_best not in best_per_char or s_best < best_per_char[ci_best][0]:
                         best_per_char[ci_best] = (s_best, k)

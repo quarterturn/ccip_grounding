@@ -3,3 +3,5 @@ onnxruntime
 numpy
 pillow
 tqdm
+torch
+transformers
