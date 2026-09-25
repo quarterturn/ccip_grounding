@@ -72,4 +72,4 @@ The CLIP model (about 1.7 GB) is downloaded on first use and cached locally.
 ## Milestones
 - [x] **Milestone 1**: Basic grounding functionality implemented. (Matches confirmed, though distinctions between visually similar characters like Mai and Nano require further refinement/glasses detection).
 - [x] **Milestone 1.5**: Head-region CCIP matching with headshot references, plus CLIP attribute verification (glasses check). Mai vs. Nano separation is now very good.
-- [ ] **Milestone 2**: Implement GPU acceleration for faster processing and iterative testing.
+- [x] **Milestone 2**: Implement GPU acceleration for faster processing and iterative testing.
