@@ -11,67 +11,67 @@ For each input image:
 2. Each crop (or just its head, with `--ccip-region head`) is compared against every reference image using **CCIP's learned difference metric**.
 3. The best-matching crop is kept if its difference is at or below the threshold.
 4. Optionally, the matched crop is checked by **CLIP** against one or more yes/no prompt pairs (e.g. glasses vs. no glasses).
-5. Matching images are copied to `output/Root_Ref/`, and all scores and bounding boxes are logged.
+5. Matching images are copied to `output/` and all scores and bounding boxes are logged.
 
 ## Project Structure
-- `ccip_grounder.py`: Main script for reference feature extraction and image grounding.
-- `reference/`: Reference images of the target character. Only images in the root are used (subfolders are ignored); they are grouped as `Root_Ref`. Clean single-character headshots work best.
-- `input/`: Images to search (full frames or crops).
-- `output/Root_Ref/`: Matching images are copied here.
-- `output/results.jsonl`: One line per input image with status, every detected crop's bounding box, CCIP difference, nearest reference image, and CLIP scores.
-- `output/.ref_cache.pkl`: Cached reference features, so they are not re-extracted on every run. Rebuilt automatically when reference files or relevant options change.
+- `ccip_grounder.py`: Original basic grounding script.
+- `ccip_grounder2.py`: Enhanced version with persistent SQLite tracking.
+- `reference/`: Reference images of target characters. Use subdirectories for each character (e.g. `reference/minakami_mai/`).
+- `input/`: Images to search.
+- `output/`: Matching images grouped by character name.
+- `(title).sql`: SQLite database storing the identity index for a specific show.
+- `output/results.jsonl`: Match logs and bounding boxes.
+- `output/.ref_cache.pkl`: Cached reference features.
 
 ## Setup and Usage
 1. Create a virtual environment: `python3 -m venv venv && source venv/bin/activate`
 2. Install dependencies: `pip install -r requirements.txt`
-   - For a CPU-only PyTorch install (smaller download), first run: `pip install torch --index-url https://download.pytorch.org/whl/cpu`
-3. Place reference images in the root of `reference/` and images to search in `input/`.
+3. Place reference images in character-specific subfolders under `reference/` (e.g. `reference/minakami_mai/`).
 4. Run the grounder:
 
-   Basic CCIP matching:
-   ```
-   python3 ccip_grounder.py --ccip-region head
-   ```
+### Persistent Identity Indexing (`ccip_grounder2.py`)
+This version allows you to run the tool multiple times for different characters in the same show, progressively building a comprehensive identity index in a database.
 
-   Recommended (CCIP + CLIP glasses check):
-   ```
-   python3 ccip_grounder.py --ccip-region head \
-     --clip-pair "an anime girl wearing glasses|an anime girl not wearing glasses" \
-     --clip-model openai/clip-vit-large-patch14-336
-   ```
+```bash
+python3 ccip_grounder2.py --title "nichijou" --reference-dir "reference/minakami_mai" --ccip-region head --clip-pair "an anime girl wearing glasses|an anime girl not wearing glasses"
+```
 
-The CLIP model (about 1.7 GB) is downloaded on first use and cached locally.
+Then run it for another character:
+```bash
+python3 ccip_grounder2.py --title "nichijou" --reference-dir "reference/naganohara_mio" --ccip-region head --clip-pair "an anime girl with blue hair|an anime girl without blue hair"
+```
 
-## Options
-| Option | Default | Description |
+The `nichijou.sql` database will now track which images contain Mai, Mio, or both.
+
+## Options for `ccip_grounder2.py`
+| Option | Required | Description |
 |---|---|---|
-| `--reference` | `reference/` | Reference image directory (root only) |
-| `--input` | `input/` | Input image directory |
-| `--output` | `output/` | Output directory |
-| `--recursive` | off | Also search subfolders of the **input** directory |
-| `--threshold` | CCIP default (0.1785) | CCIP difference threshold; lower is stricter |
-| `--topk` | 1 | Score = mean of the k closest references (1 = nearest neighbour) |
-| `--crop-refs` | off | Crop the largest person out of each reference image (not needed for headshots) |
-| `--ccip-region` | `person` | What CCIP compares: `person` crop or `head` only |
-| `--det-conf` | 0.3 | Person detection confidence threshold |
-| `--pad` | 0.1 | Padding around person boxes |
-| `--min-crop` | 64 | Ignore detections smaller than this (px) |
-| `--clip-pair` | none | `"YES prompt\|NO prompt"`; repeatable, all pairs must pass |
-| `--clip-min` | 0.6 | Required P(YES) for each pair; use `0` to only log scores |
-| `--clip-region` | `head` | Region CLIP checks: `head` or `person` |
-| `--clip-model` | `openai/clip-vit-large-patch14` | Hugging Face CLIP model |
-| `--save-crops` | off | Save the matched crop next to each copied image |
+| `--title` | Yes | Title of the show (used as the database filename) |
+| `--reference-dir` | Yes | Path to the character's reference folder (must be under `reference/`) |
+| `--input` | No | Input image directory (default: `input/`) |
+| `--output` | No | Output directory (default: `output/`) |
+| `--recursive` | No | Search subfolders of the **input** directory |
+| `--threshold` | No | CCIP diff threshold; lower is stricter |
+| `--topk` | No | Score = mean of k closest refs (default: 1) |
+| `--crop-refs` | No | Crop the largest person out of reference images |
+| `--ccip-region` | No | `person` or `head` (default: `person`) |
+| `--det-conf` | No | Person detection confidence (default: 0.3) |
+| `--pad` | No | Padding around person boxes (default: 0.1) |
+| `--min-crop` | No | Ignore detections smaller than this (default: 64px) |
+| `--clip-pair` | No | `\"YES prompt\\|NO prompt\"`; repeatable |
+| `--clip-min` | No | Required P(YES) for each pair (default: 0.6) |
+| `--clip-region` | No | `head` or `person` (default: `head`) |
+| `--clip-model` | No | HF CLIP model path |
+| `--save-crops` | No | Save the matched crop to output |
+| `--clean` | No | Prune images no longer on disk from the database |
 
 ## Technical Notes
-- **Identity model**: CCIP (ONNX, via `dghs-imgutils`).
-- **Detection**: `imgutils` person and head detectors (ONNX).
-- **Distance metric**: CCIP's own learned difference metric (`ccip_batch_differences`), not cosine distance. Lower means more similar.
-- **Threshold**: `ccip_default_threshold()` (0.1785) unless overridden with `--threshold`.
-- **Matching**: Nearest reference by default (`--topk 1`), not a mean anchor vector.
-- **Attribute check**: CLIP via Hugging Face `transformers` (PyTorch). Each pair is scored as a softmax between its YES and NO prompts; a match must reach `--clip-min` on every pair. CLIP errors reject the image (fail closed) and are reported.
-- **Calibration**: Run with `--clip-min 0` to log CLIP scores without filtering, then set `--clip-min` between the scores of true and false matches in `results.jsonl`.
+- **Identity model**: CCIP (ONNX). Distance metric is a learned difference, not cosine distance.
+- **Persistence**: Uses SQLite to avoid redundant scans and allow multi-character identity layering.
+- **Tagging**: The character tag is derived automatically from the `--reference-dir` folder name.
 
 ## Milestones
-- [x] **Milestone 1**: Basic grounding functionality implemented. (Matches confirmed, though distinctions between visually similar characters like Mai and Nano require further refinement/glasses detection).
-- [x] **Milestone 1.5**: Head-region CCIP matching with headshot references, plus CLIP attribute verification (glasses check). Mai vs. Nano separation is now very good.
-- [x] **Milestone 2**: Implement GPU acceleration for faster processing and iterative testing.
+- [x] **Milestone 1**: Basic grounding functionality implemented.
+- [x] **Milestone 1.5**: Head-region matching and CLIP attribute verification.
+- [x] **Milestone 2**: GPU acceleration.
+- [x] **Milestone 3**: Persistent SQLite identity indexing and automated character tagging.
