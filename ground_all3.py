@@ -8,7 +8,7 @@ BASE_DIR = Path('/home/alex/Documents/ccip_grounding')
 REF_DIR = BASE_DIR / 'reference'
 INPUT_DIR = BASE_DIR / 'input' 
 VENV_PYTHON = BASE_DIR / 'venv' / 'bin' / 'python3'
-SCRIPT_PATH = BASE_DIR / 'ccip_grounder3.py'
+SCRIPT_PATH = BASE_DIR / 'ccip_grounder.py'
 TITLE = 'mushoku_tensei_3'
 
 def main():

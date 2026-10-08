@@ -1,5 +1,4 @@
 # CCIP Anime Face Grounding
-# (mirroring to github)
 
 This project implements a zero-shot identity grounding system for anime characters using the **CCIP (Contrastive Character Image Pretraining)** model via the `dghs-imgutils` library, with an optional **CLIP** attribute check to separate visually similar characters.
 
@@ -11,39 +10,38 @@ For each input image:
 2. Each crop (or just its head, with `--ccip-region head`) is compared against every reference image using **CCIP's learned difference metric**.
 3. The best-matching crop is kept if its difference is at or below the threshold.
 4. Optionally, the matched crop is checked by **CLIP** against one or more yes/no prompt pairs (e.g. glasses vs. no glasses).
-5. Matching images are copied to `output/` and all scores and bounding boxes are logged.
+5. Matches are logged to a persistent SQLite database and results are written to `output/`.
 
 ## Project Structure
-- `ccip_grounder.py`: Original basic grounding script.
-- `ccip_grounder2.py`: Enhanced version with persistent SQLite tracking.
+- `ccip_grounder.py`: The main grounding script with persistent SQLite tracking.
+- `ground_all3.py`: Orchestrator to process all characters in the `reference/` directory.
+- `audit_viewer.py`: Tool for auditing grounding results via contact sheets.
 - `reference/`: Reference images of target characters. Use subdirectories for each character (e.g. `reference/minakami_mai/`).
 - `input/`: Images to search.
-- `output/`: Matching images grouped by character name.
+- `output/`: Matching results, logs, and reference caches.
 - `(title).sql`: SQLite database storing the identity index for a specific show.
-- `output/results.jsonl`: Match logs and bounding boxes.
-- `output/.ref_cache.pkl`: Cached reference features.
 
 ## Setup and Usage
 1. Create a virtual environment: `python3 -m venv venv && source venv/bin/activate`
 2. Install dependencies: `pip install -r requirements.txt`
-3. Place reference images in character-specific subfolders under `reference/` (e.g. `reference/minakami_mai/`).
+3. Place reference images in character-specific subfolders under `reference/`.
 4. Run the grounder:
 
-### Persistent Identity Indexing (`ccip_grounder2.py`)
-This version allows you to run the tool multiple times for different characters in the same show, progressively building a comprehensive identity index in a database.
+### Persistent Identity Indexing
+The grounder uses a database to track characters across multiple runs. You can process one character at a time to build a comprehensive index for a show.
 
 ```bash
-python3 ccip_grounder2.py --title "nichijou" --reference-dir "reference/minakami_mai" --ccip-region head --clip-pair "an anime girl wearing glasses|an anime girl not wearing glasses"
+python3 ccip_grounder.py --title "nichijou" --reference-dir "reference/minakami_mai" --ccip-region head --clip-pair "an anime girl wearing glasses|an anime girl not wearing glasses"
 ```
 
 Then run it for another character:
 ```bash
-python3 ccip_grounder2.py --title "nichijou" --reference-dir "reference/naganohara_mio" --ccip-region head --clip-pair "an anime girl with blue hair|an anime girl without blue hair"
+python3 ccip_grounder.py --title "nichijou" --reference-dir "reference/naganohara_mio" --ccip-region head --clip-pair "an anime girl with blue hair|an anime girl without blue hair"
 ```
 
 The `nichijou.sql` database will now track which images contain Mai, Mio, or both.
 
-## Options for `ccip_grounder2.py`
+## Options for `ccip_grounder.py`
 | Option | Required | Description |
 |---|---|---|
 | `--title` | Yes | Title of the show (used as the database filename) |
@@ -58,12 +56,13 @@ The `nichijou.sql` database will now track which images contain Mai, Mio, or bot
 | `--det-conf` | No | Person detection confidence (default: 0.3) |
 | `--pad` | No | Padding around person boxes (default: 0.1) |
 | `--min-crop` | No | Ignore detections smaller than this (default: 64px) |
-| `--clip-pair` | No | `\"YES prompt\\|NO prompt\"`; repeatable |
+| `--clip-pair` | No | `"YES prompt\|NO prompt"`; repeatable |
 | `--clip-min` | No | Required P(YES) for each pair (default: 0.6) |
 | `--clip-region` | No | `head` or `person` (default: `head`) |
 | `--clip-model` | No | HF CLIP model path |
 | `--save-crops` | No | Save the matched crop to output |
 | `--clean` | No | Prune images no longer on disk from the database |
+| `--refresh` | No | Purge existing tags for the character before grounding |
 
 ## Technical Notes
 - **Identity model**: CCIP (ONNX). Distance metric is a learned difference, not cosine distance.
