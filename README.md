@@ -14,7 +14,7 @@ For each input image:
 
 ## Project Structure
 - `ccip_grounder.py`: The main grounding script with persistent SQLite tracking.
-- `ground_all3.py`: Orchestrator to process all characters in the `reference/` directory.
+- `ground_all.py`: Orchestrator to process all characters in the `reference/` directory.
 - `audit_viewer.py`: Tool for auditing grounding results via contact sheets.
 - `reference/`: Reference images of target characters. Use subdirectories for each character (e.g. `reference/minakami_mai/`).
 - `input/`: Images to search.
