@@ -99,8 +99,6 @@ class DBManager:
     def purge_character(self, char_tag):
         """Remove a specific character tag from all images in the database."""
         with self.conn:
-            # This is a bit tricky with comma-separated strings. 
-            # We'll fetch all, filter in python, and update.
             cursor = self.conn.execute("SELECT name, characters FROM images")
             all_rows = cursor.fetchall()
             updated = 0
@@ -408,39 +406,39 @@ def main():
                         if not clip_error_shown:
                             traceback.print_exc()
                             clip_error_shown = True
-                        m["status"] = \"CLIP_ERROR\"
+                        m["status"] = "CLIP_ERROR"
                         m["error"] = repr(e)
-                        statuses.append(\"CLIP_ERROR\")
-                        rec[\"matches\"].append(m)
+                        statuses.append("CLIP_ERROR")
+                        rec["matches"].append(m)
                         continue
-                    m[\"clip\"] = {yes: p for (yes, _no), p in zip(pairs, probs)}
+                    m["clip"] = {yes: p for (yes, _no), p in zip(pairs, probs)}
                     if min(probs) < args.clip_min:
-                        m[\"status\"] = \"CLIP_FAIL\"
-                        statuses.append(\"CLIP_FAIL\")
-                        rec[\"matches\"].append(m)
+                        m["status"] = "CLIP_FAIL"
+                        statuses.append("CLIP_FAIL")
+                        rec["matches"].append(m)
                         continue
 
-                m[\"status\"] = \"MATCH\"
-                statuses.append(\"MATCH\")
+                m["status"] = "MATCH"
+                statuses.append("MATCH")
                 any_match = True
                 db.add_character_tag(img_name, name)
                 
-                rec[\"matches\"].append(m)
+                rec["matches"].append(m)
 
             if any_match:
-                rec[\"status\"] = \"MATCH\"
-            elif \"CLIP_ERROR\" in statuses:
-                rec[\"status\"] = \"CLIP_ERROR\"
+                rec["status"] = "MATCH"
+            elif "CLIP_ERROR" in statuses:
+                rec["status"] = "CLIP_ERROR"
             else:
-                rec[\"status\"] = \"CLIP_FAIL\"
-            counts[rec[\"status\"]] += 1
-            log.write(json.dumps(rec) + \"\\\\n\")
+                rec["status"] = "CLIP_FAIL"
+            counts[rec["status"]] += 1
+            log.write(json.dumps(rec) + "\\n")
 
-    print(\"\\\\nDone.\")
+    print("\\nDone.")
     for k, v in counts.items():
-        print(f\"  {k:<11} {v}\")
-    print(f\"Log: {results_path}\")
+        print(f"  {k:<11} {v}")
+    print(f"Log: {results_path}")
     db.close()
 
-if __name__ == \"__main__\":
+if __name__ == "__main__":
     main()
