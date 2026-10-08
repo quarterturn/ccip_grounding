@@ -3,19 +3,19 @@
 CCIP character grounding with persistent SQLite database tracking.
 
 Usage:
-  python ccip_grounder2.py --title "show_name" --reference-dir "reference/char_name" [options]
+  python ccip_grounder3.py --title "show_name" --reference-dir "reference/char_name" [options]
 
 Features:
   - Maintains a (title).sql database of images and their detected characters.
   - Reference directory name is used as the character tag.
   - Incremental updates: only scans for new files.
   - --clean option to prune missing files from the database.
+  - --refresh option to purge existing tags for the character before grounding.
 """
 import argparse
 import json
 import os
 import pickle
-import shutil
 import sqlite3
 import sys
 import traceback
@@ -80,6 +80,40 @@ class DBManager:
                         "UPDATE images SET characters = ? WHERE name = ?",
                         (",".join(chars), image_name)
                     )
+
+    def remove_character_tag(self, image_name, char_tag):
+        """Remove a character tag from an image."""
+        with self.conn:
+            row = self.conn.execute(
+                "SELECT characters FROM images WHERE name = ?", (image_name,)
+            ).fetchone()
+            if row:
+                chars = row[0].split(",") if row[0] else []
+                if char_tag in chars:
+                    chars.remove(char_tag)
+                    self.conn.execute(
+                        "UPDATE images SET characters = ? WHERE name = ?",
+                        (",".join(chars), image_name)
+                    )
+
+    def purge_character(self, char_tag):
+        """Remove a specific character tag from all images in the database."""
+        with self.conn:
+            # This is a bit tricky with comma-separated strings. 
+            # We'll fetch all, filter in python, and update.
+            cursor = self.conn.execute("SELECT name, characters FROM images")
+            all_rows = cursor.fetchall()
+            updated = 0
+            for name, characters in all_rows:
+                chars = characters.split(",") if characters else []
+                if char_tag in chars:
+                    chars.remove(char_tag)
+                    self.conn.execute(
+                        "UPDATE images SET characters = ? WHERE name = ?",
+                        (",".join(chars), name)
+                    )
+                    updated += 1
+        return updated
 
     def get_all_images(self):
         cursor = self.conn.execute("SELECT name, path FROM images")
@@ -247,6 +281,7 @@ def main():
     ap.add_argument("--clip-model", default="openai/clip-vit-large-patch14")
     ap.add_argument("--save-crops", action="store_true")
     ap.add_argument("--clean", action="store_true", help="Prune missing images from DB")
+    ap.add_argument("--refresh", action="store_true", help="Purge existing tags for the character before grounding")
     
     args = ap.parse_args()
 
@@ -284,6 +319,12 @@ def main():
         ref_paths += anchor_paths[name]
     ref_owner = np.array(ref_owner)
     n_ref = len(ref_feats)
+
+    if args.refresh:
+        char_to_refresh = char_names[0] # Usually the only one in reference_dir
+        print(f"Refreshing identity index for {char_to_refresh}...")
+        removed = db.purge_character(char_to_refresh)
+        print(f"Removed {removed} existing tags for {char_to_refresh}.")
 
     print("Updating identity index...")
     input_imgs = list_images(args.input, args.recursive)
@@ -367,39 +408,39 @@ def main():
                         if not clip_error_shown:
                             traceback.print_exc()
                             clip_error_shown = True
-                        m["status"] = "CLIP_ERROR"
+                        m["status"] = \"CLIP_ERROR\"
                         m["error"] = repr(e)
-                        statuses.append("CLIP_ERROR")
-                        rec["matches"].append(m)
+                        statuses.append(\"CLIP_ERROR\")
+                        rec[\"matches\"].append(m)
                         continue
-                    m["clip"] = {yes: p for (yes, _no), p in zip(pairs, probs)}
+                    m[\"clip\"] = {yes: p for (yes, _no), p in zip(pairs, probs)}
                     if min(probs) < args.clip_min:
-                        m["status"] = "CLIP_FAIL"
-                        statuses.append("CLIP_FAIL")
-                        rec["matches"].append(m)
+                        m[\"status\"] = \"CLIP_FAIL\"
+                        statuses.append(\"CLIP_FAIL\")
+                        rec[\"matches\"].append(m)
                         continue
 
-                m["status"] = "MATCH"
-                statuses.append("MATCH")
+                m[\"status\"] = \"MATCH\"
+                statuses.append(\"MATCH\")
                 any_match = True
                 db.add_character_tag(img_name, name)
                 
-                rec["matches"].append(m)
+                rec[\"matches\"].append(m)
 
             if any_match:
-                rec["status"] = "MATCH"
-            elif "CLIP_ERROR" in statuses:
-                rec["status"] = "CLIP_ERROR"
+                rec[\"status\"] = \"MATCH\"
+            elif \"CLIP_ERROR\" in statuses:
+                rec[\"status\"] = \"CLIP_ERROR\"
             else:
-                rec["status"] = "CLIP_FAIL"
-            counts[rec["status"]] += 1
-            log.write(json.dumps(rec) + "\\n")
+                rec[\"status\"] = \"CLIP_FAIL\"
+            counts[rec[\"status\"]] += 1
+            log.write(json.dumps(rec) + \"\\\\n\")
 
-    print("\\nDone.")
+    print(\"\\\\nDone.\")
     for k, v in counts.items():
-        print(f"  {k:<11} {v}")
-    print(f"Log: {results_path}")
+        print(f\"  {k:<11} {v}\")
+    print(f\"Log: {results_path}\")
     db.close()
 
-if __name__ == "__main__":
+if __name__ == \"__main__\":
     main()
