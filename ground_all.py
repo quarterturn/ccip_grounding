@@ -70,9 +70,11 @@ def main():
     # Process in parallel
     # Max workers = number of GPUs since each process uses one’s full VRAM
     with ProcessPoolExecutor(max_workers=num_gpus) as executor:
-        # Use map to trigger them; results are returned as they finish if we use as_completed, 
-        # but executor.map is simpler for a fixed list.
-        results = list(executor.map(lambda p: run_grounding(*p), jobs))
+        # Submit all jobs to the pool without lambdas to avoid pickling errors
+        futures = [executor.submit(run_grounding, char, args.threshold, gpu_id) for char, threshold, gpu_id in jobs]
+        
+        # Gather results as they complete
+        results = [f.result() for f in futures]
 
     for res in results:
         print(res)
