@@ -327,8 +327,8 @@ def main():
     ref_imgs = list_images(ref_dir, recursive=False)
     
     added_input = db.register_images(input_imgs)
-    added_ref = db.register_images(ref_imgs)
-    print(f"Registered {added_input} new input images and {added_ref} new reference images.")
+    # Reference images are used for anchors but should not be processed as input images
+    print(f"Registered {added_input} input images. (Reference images are used as anchors only)")
 
     pairs = parse_pairs(args.clip_pair)
     clip = None
