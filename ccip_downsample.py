@@ -94,7 +94,7 @@ def main():
     for char in tqdm(chars, desc="Balancing Characters"):
         # Get all images containing this character
         # Use LIKE because 'characters' column is comma-separated (e.g. "Rudeus, Roxy")
-        query = f"SELECT name, path FROM images WHERE characters LIKE '%{char}%'"
+        query = f"SELECT name, path, characters FROM images WHERE characters LIKE '%{char}%'"
         rows = conn.execute(query).fetchall()
         
         if not rows: continue
