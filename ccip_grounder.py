@@ -19,6 +19,7 @@ import pickle
 import sqlite3
 import sys
 import traceback
+import time
 from pathlib import Path
 
 import numpy as np
@@ -39,11 +40,25 @@ class DBManager:
     def __init__(self, db_path):
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path)
+        self.conn.execute("PRAGMA journal_mode=WAL")
         self._init_db()
+
+    def _retry_execute(self, sql, params=None):
+        """Execute a SQL statement, retrying on 'database is locked' errors."""
+        retries = 0
+        while True:
+            try:
+                return self.conn.execute(sql, params or ())
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e).lower() and retries < 10:
+                    retries += 1
+                    time.sleep(0.1)
+                else:
+                    raise
 
     def _init_db(self):
         with self.conn:
-            self.conn.execute(
+            self._retry_execute(
                 "CREATE TABLE IF NOT EXISTS images ("
                 "name TEXT PRIMARY KEY, "
                 "path TEXT, "
@@ -57,7 +72,7 @@ class DBManager:
             for p in image_paths:
                 name = os.path.basename(p)
                 try:
-                    self.conn.execute(
+                    self._retry_execute(
                         "INSERT INTO images (name, path, characters) VALUES (?, ?, ?)",
                         (name, p, "")
                     )
@@ -69,14 +84,14 @@ class DBManager:
     def add_character_tag(self, image_name, char_tag):
         """Add a character tag to an image, avoiding duplicates."""
         with self.conn:
-            row = self.conn.execute(
+            row = self._retry_execute(
                 "SELECT characters FROM images WHERE name = ?", (image_name,)
             ).fetchone()
             if row:
                 chars = row[0].split(",") if row[0] else []
                 if char_tag not in chars:
                     chars.append(char_tag)
-                    self.conn.execute(
+                    self._retry_execute(
                         "UPDATE images SET characters = ? WHERE name = ?",
                         (",".join(chars), image_name)
                     )
@@ -84,14 +99,14 @@ class DBManager:
     def remove_character_tag(self, image_name, char_tag):
         """Remove a character tag from an image."""
         with self.conn:
-            row = self.conn.execute(
+            row = self._retry_execute(
                 "SELECT characters FROM images WHERE name = ?", (image_name,)
             ).fetchone()
             if row:
                 chars = row[0].split(",") if row[0] else []
                 if char_tag in chars:
                     chars.remove(char_tag)
-                    self.conn.execute(
+                    self._retry_execute(
                         "UPDATE images SET characters = ? WHERE name = ?",
                         (",".join(chars), image_name)
                     )
@@ -99,14 +114,14 @@ class DBManager:
     def purge_character(self, char_tag):
         """Remove a specific character tag from all images in the database."""
         with self.conn:
-            cursor = self.conn.execute("SELECT name, characters FROM images")
+            cursor = self._retry_execute("SELECT name, characters FROM images")
             all_rows = cursor.fetchall()
             updated = 0
             for name, characters in all_rows:
                 chars = characters.split(",") if characters else []
                 if char_tag in chars:
                     chars.remove(char_tag)
-                    self.conn.execute(
+                    self._retry_execute(
                         "UPDATE images SET characters = ? WHERE name = ?",
                         (",".join(chars), name)
                     )
@@ -114,7 +129,7 @@ class DBManager:
         return updated
 
     def get_all_images(self):
-        cursor = self.conn.execute("SELECT name, path FROM images")
+        cursor = self._retry_execute("SELECT name, path FROM images")
         return cursor.fetchall()
 
     def prune_missing(self):
@@ -124,7 +139,7 @@ class DBManager:
         with self.conn:
             for name, path in all_imgs:
                 if not os.path.exists(path):
-                    self.conn.execute("DELETE FROM images WHERE name = ?", (name,))
+                    self._retry_execute("DELETE FROM images WHERE name = ?", (name,))
                     removed += 1
         return removed
 
