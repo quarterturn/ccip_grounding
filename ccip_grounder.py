@@ -284,9 +284,7 @@ def main():
     args = ap.parse_args()
 
     ref_dir = os.path.abspath(args.reference_dir)
-    base_ref = os.path.abspath(os.path.join(base, "reference"))
-    if not ref_dir.startswith(base_ref):
-        sys.exit(f"ERROR: --reference-dir must be a subdirectory of {base_ref}")
+    # removed strict reference-dir path check to allow external reference directories
 
     db_path = os.path.join(base, f"{args.title}.sql")
     db = DBManager(db_path)
