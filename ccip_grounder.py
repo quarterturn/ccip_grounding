@@ -217,6 +217,20 @@ def parse_pairs(raw):
         pairs.append((yes, no))
     return pairs
 
+# ---------------------------------------------------------------- scoring
+def crop_best_match(diffs_row, ref_owner, n_chars, topk):
+    """Best character for one crop: mean of k closest refs per character.
+
+    diffs_row: 1-D array of CCIP distances from this crop to every ref.
+    ref_owner: per-ref character index. Returns (char_index, score).
+    """
+    char_scores = []
+    for ci in range(n_chars):
+        d = np.sort(diffs_row[ref_owner == ci])
+        char_scores.append(float(d[:max(1, min(topk, len(d)))].mean()))
+    ci_best = int(np.argmin(char_scores))
+    return ci_best, char_scores[ci_best]
+
 # ---------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description="CCIP character grounder + SQLite identity index")
@@ -341,13 +355,8 @@ def main():
         best_per_char = {}
         rec = {"image": path, "matches": [], "crops": []}
         for k, (box, det_score, _crop) in enumerate(crops):
-            char_scores = []
-            for ci in range(len(char_names)):
-                d = np.sort(diffs[k, ref_owner == ci])
-                char_scores.append(float(d[:max(1, min(args.topk, len(d)))].mean()))
-
-            ci_best = int(np.argmin(char_scores))
-            s_best = char_scores[ci_best]
+            ci_best, s_best = crop_best_match(diffs[k], ref_owner,
+                                              len(char_names), args.topk)
             nearest = int(np.argmin(diffs[k]))
 
             rec["crops"].append({"box": list(box), "det_score": det_score,
