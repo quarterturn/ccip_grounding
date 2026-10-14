@@ -246,9 +246,10 @@ def main():
                          "(sets CUDA_VISIBLE_DEVICES before any model loads)")
     ap.add_argument("--batch-size", type=int, default=32,
                     help="Images loaded/detected per batch (default: 32)")
-    ap.add_argument("--max-crops", type=int, default=16,
+    ap.add_argument("--max-crops", type=int, default=8,
                     help="Max crops per batched CCIP ONNX call; bounds GPU "
-                         "activation memory (default: 16; 83 OOMed ~8GB on a 3090)")
+                         "activation memory (default: 8; measured fastest on "
+                         ".80, 83 crops OOMed ~8GB on a 3090)")
 
     args = ap.parse_args()
 

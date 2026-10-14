@@ -70,11 +70,12 @@ The `nichijou.sql` database will now track which images contain Mai, Mio, or bot
 | `--yes` | No | Skip the `--clean` confirmation prompt (for scripted runs) |
 | `--refresh` | No | Purge existing tags for the character before grounding |
 | `--gpu` | No | Pin ONNX + CLIP to a physical GPU ID (e.g. `--gpu 1`) |
-| `--batch-size` | No | Images per batched CCIP call (default: 32; use 1 to debug per-image) |
+| `--batch-size` | No | Images loaded/detected per batch (default: 32) |
+| `--max-crops` | No | Max crops per batched CCIP ONNX call (default: 8; bounds VRAM) |
 
 ## Technical Notes
 - **Identity model**: CCIP (ONNX). Distance metric is a learned difference, not cosine distance.
-- **Batched extraction**: `--batch-size` groups crops into one ONNX forward pass. Measured on .80 (48 stills, 100 refs, RTX 3090): throughput is roughly neutral vs per-crop extraction because person detection dominates runtime, not CCIP. Kept because it reduces per-image Python/ONNX call overhead and scales better with larger reference sets.
+- **Batched extraction**: `--batch-size` images are loaded/detected per pass; CCIP ONNX calls then run in chunks of `--max-crops` crops (bounds activation memory — 83 crops at 384px OOMed ~8GB on a 3090). Measured on .80 (48 stills, RTX 3090, ~100 refs): CCIP is compute-saturated, so chunk sizes 8–32 all land within noise of per-crop timing; 8 measured fastest and is the default. The real win is robustness: a failed chunk retries per-crop instead of killing the run.
 - **Batched vs per-image numerics**: ONNX float accumulation order varies with batch shape. Measured end-to-end drift: max ~6e-05 in CCIP distance, zero status flips across test sets. If you ever set thresholds with margins smaller than ~1e-4, run with `--batch-size 1` for reproducibility.
 - **Persistence**: Uses SQLite to avoid redundant scans and allow multi-character identity layering.
 - **Schema (v2)**: `images(path PRIMARY KEY, name)` plus an `image_tags(path, char)` join table. Paths are the key (no basename collisions) and tags are exact-match (no substring bleed). Legacy v1 databases are detected and rejected; migrate them with `python3 migrate_v2.py --db <file> --dry-run` first, then without `--dry-run`. The original v1 table is preserved as `images_legacy`.
