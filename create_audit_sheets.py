@@ -10,15 +10,10 @@ import math
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
+from dbutil import open_v2, distinct_chars, paths_for_char
 
 def create_sheet(db_conn, char, output_dir, thumb_size=320):
-    cursor = db_conn.cursor()
-    
-    # Find images tagged with this character
-    cursor.execute('SELECT path FROM images WHERE characters LIKE ?', (f'%{char}%',))
-    rows = cursor.fetchall()
-    
-    paths = [r[0] for r in rows]
+    paths = paths_for_char(db_conn, char)
     num_imgs = len(paths)
     if num_imgs == 0:
         return False
@@ -88,20 +83,8 @@ def main():
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(args.db)
-    cursor = conn.cursor()
-    
-    # Get all unique characters from the comma-separated characters column
-    cursor.execute("SELECT DISTINCT characters FROM images WHERE characters != ''")
-    char_rows = cursor.fetchall()
-    
-    all_chars = set()
-    for row in char_rows:
-        for c in row[0].split(','):
-            if c.strip():
-                all_chars.add(c.strip())
-    
-    chars = sorted(list(all_chars))
+    conn = open_v2(args.db)
+    chars = distinct_chars(conn)
     print(f"Found {len(chars)} characters. Generating sheets in {output_dir}...")
 
     for char in tqdm(chars, desc="Creating Sheets"):

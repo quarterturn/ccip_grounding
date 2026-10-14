@@ -1,58 +1,46 @@
 #!/usr/bin/env python3
 """
-Database Pruning Utility for CCIP Grounding.
+Database Pruning Utility for CCIP Grounding (v2 schema).
 Removes entries from the identity database if the corresponding image file 
 no longer exists on the filesystem.
 """
 import argparse
-import sqlite3
 import os
 from tqdm import tqdm
+from dbutil import open_v2
+
 
 def prune_database(db_path):
     if not os.path.exists(db_path):
         print(f"Error: Database file {db_path} not found.")
         return
 
-    conn = None
+    conn = open_v2(db_path)
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-
-        # Fetch all image records
-        cursor.execute("SELECT name, path FROM images")
-        rows = cursor.fetchall()
-        
+        rows = conn.execute("SELECT path FROM images").fetchall()
         if not rows:
             print("No images found in the database to verify.")
             return
 
         print(f"Checking {len(rows)} images in {db_path}...")
-        
-        to_delete = []
-        for name, path in tqdm(rows):
-            if not os.path.exists(path):
-                to_delete.append(name)
+
+        to_delete = [p for (p,) in tqdm(rows) if not os.path.exists(p)]
 
         if not to_delete:
             print("All images verified. No pruning necessary.")
             return
 
-        # Remove missing files from DB
         print(f"Pruning {len(to_delete)} missing files from database...")
-        
-        # Using a transaction for speed
-        cursor.execute("BEGIN TRANSACTION")
-        cursor.executemany("DELETE FROM images WHERE name = ?", [(name,) for name in to_delete])
-        conn.commit()
-        
-        print(f"Successfully pruned {len(to_delete)} entries.")
+        with conn:
+            conn.executemany("DELETE FROM image_tags WHERE path = ?",
+                             [(p,) for p in to_delete])
+            conn.executemany("DELETE FROM images WHERE path = ?",
+                             [(p,) for p in to_delete])
 
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+        print(f"Successfully pruned {len(to_delete)} entries.")
     finally:
-        if conn:
-            conn.close()
+        conn.close()
+
 
 def main():
     parser = argparse.ArgumentParser(description="Prune missing images from the CCIP identity database.")
@@ -60,6 +48,7 @@ def main():
     args = parser.parse_args()
 
     prune_database(args.db)
+
 
 if __name__ == "__main__":
     main()

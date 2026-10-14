@@ -1,9 +1,9 @@
 import argparse
-import sqlite3
 import os
 import math
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
+from dbutil import open_v2, paths_for_char
 
 def main():
     ap = argparse.ArgumentParser(description='Create a contact sheet for auditing character grounding.')
@@ -22,15 +22,9 @@ def main():
         print(f'Error: Database {db_path} not found.')
         return
 
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    # Find images tagged with this character
-    cursor.execute('SELECT path FROM images WHERE characters LIKE ?', (f'%{args.char}%',))
-    rows = cursor.fetchall()
+    conn = open_v2(db_path)
+    paths = paths_for_char(conn, args.char)
     conn.close()
-
-    paths = [r[0] for r in rows]
     num_imgs = len(paths)
     if num_imgs == 0:
         print(f'No images found for character: {args.char}')

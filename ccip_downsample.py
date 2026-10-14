@@ -12,6 +12,7 @@ from pathlib import Path
 from tqdm import tqdm
 from imgutils.detect import detect_person, detect_heads
 from imgutils.metrics import ccip_extract_feature, ccip_default_threshold
+from dbutil import open_v2, distinct_chars
 
 def load_rgb(path):
     from PIL import Image
@@ -73,29 +74,26 @@ def main():
     parser.add_argument("--region", choices=['head', 'person'], default='head', help="Region to use for diversity calc")
     args = parser.parse_args()
 
-    conn = sqlite3.connect(args.db)
+    conn = open_v2(args.db)
     conn.row_factory = sqlite3.Row
-    
-    # Get all unique characters
-    char_rows = conn.execute("SELECT DISTINCT characters FROM images WHERE characters != ''").fetchall()
-    # Note: characters is a comma-separated list in the images table
-    all_chars_raw = set()
-    for row in char_rows:
-        for c in row['characters'].split(','):
-            if c.strip(): all_chars_raw.add(c.strip())
-    
-    chars = sorted(list(all_chars_raw))
+
+    chars = distinct_chars(conn)
     print(f"Found {len(chars)} characters to balance.")
 
-    # Setup output DB
+    # Setup output DB (v2 schema)
     out_conn = sqlite3.connect(args.out_db)
-    out_conn.execute("CREATE TABLE IF NOT EXISTS images (name TEXT PRIMARY KEY, path TEXT, characters TEXT)")
+    out_conn.execute("CREATE TABLE IF NOT EXISTS images (path TEXT PRIMARY KEY, name TEXT)")
+    out_conn.execute("CREATE TABLE IF NOT EXISTS image_tags ("
+                     "path TEXT NOT NULL, char TEXT NOT NULL, "
+                     "PRIMARY KEY (path, char))")
+    out_conn.execute("CREATE INDEX IF NOT EXISTS idx_tags_char ON image_tags(char)")
 
     for char in tqdm(chars, desc="Balancing Characters"):
-        # Get all images containing this character
-        # Use LIKE because 'characters' column is comma-separated (e.g. "Rudeus, Roxy")
-        query = f"SELECT name, path, characters FROM images WHERE characters LIKE '%{char}%'"
-        rows = conn.execute(query).fetchall()
+        # Exact-match join: no substring bleed between similar tag names
+        rows = conn.execute(
+            "SELECT i.path, i.name FROM images i "
+            "JOIN image_tags t ON i.path = t.path WHERE t.char = ?",
+            (char,)).fetchall()
         
         if not rows: continue
 
@@ -114,12 +112,21 @@ def main():
         # 2. Diversity Sampling
         selected_indices = max_min_sample(feats, args.target)
         
-        # 3. Save to new DB
+        # 3. Save to new DB (carry ALL tags of a selected image, not just
+        #    the character being balanced, to preserve multi-character rows)
         for idx in selected_indices:
             row = valid_rows[idx]
-            # We keep the original characters string to preserve multi-character tags
-            out_conn.execute("INSERT OR REPLACE INTO images (name, path, characters) VALUES (?, ?, ?)", 
-                             (row['name'], row['path'], row['characters']))
+            tags = [t[0] for t in conn.execute(
+                "SELECT char FROM image_tags WHERE path = ?", (row['path'],))]
+            out_conn.execute(
+                "INSERT OR REPLACE INTO images (path, name) VALUES (?, ?)",
+                (row['path'], row['name']))
+            out_conn.execute("DELETE FROM image_tags WHERE path = ?",
+                             (row['path'],))
+            for t in tags:
+                out_conn.execute(
+                    "INSERT OR IGNORE INTO image_tags (path, char) VALUES (?, ?)",
+                    (row['path'], t))
         
         out_conn.commit()
 

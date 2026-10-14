@@ -10,12 +10,18 @@ For each input image:
 2. Each crop (or just its head, with `--ccip-region head`) is compared against every reference image using **CCIP's learned difference metric**.
 3. The best-matching crop is kept if its difference is at or below the threshold.
 4. Optionally, the matched crop is checked by **CLIP** against one or more yes/no prompt pairs (e.g. glasses vs. no glasses).
-5. Matches are logged to a persistent SQLite database and results are written to `output/`.
+5. Matches are logged to a persistent SQLite database and results are written to `output/` (one `results_<character>.jsonl` per run).
 
 ## Project Structure
 - `ccip_grounder.py`: The main grounding script with persistent SQLite tracking.
 - `ground_all.py`: Orchestrator to process all characters in the `reference/` directory.
+- `migrate_v2.py`: One-time migration of legacy (v1) databases to the v2 schema.
+- `dbutil.py`: Shared v2-schema DB helpers (refuses legacy databases).
 - `audit_viewer.py`: Tool for auditing grounding results via contact sheets.
+- `create_audit_sheets.py`: Batch contact sheets for every character in a database.
+- `ccip_downsample.py`: Max-min diversity downsampling per character.
+- `ccip_hard_cap.py`: Random pruning to enforce a strict per-character cap.
+- `db_prune.py`: Remove database entries whose files no longer exist on disk.
 - `reference/`: Reference images of target characters. Use subdirectories for each character (e.g. `reference/minakami_mai/`).
 - `input/`: Images to search.
 - `output/`: Matching results, logs, and reference caches.
@@ -61,11 +67,13 @@ The `nichijou.sql` database will now track which images contain Mai, Mio, or bot
 | `--clip-region` | No | `head` or `person` (default: `head`) |
 | `--clip-model` | No | HF CLIP model path |
 | `--clean` | No | Prune images no longer on disk from the database |
+| `--yes` | No | Skip the `--clean` confirmation prompt (for scripted runs) |
 | `--refresh` | No | Purge existing tags for the character before grounding |
 
 ## Technical Notes
 - **Identity model**: CCIP (ONNX). Distance metric is a learned difference, not cosine distance.
 - **Persistence**: Uses SQLite to avoid redundant scans and allow multi-character identity layering.
+- **Schema (v2)**: `images(path PRIMARY KEY, name)` plus an `image_tags(path, char)` join table. Paths are the key (no basename collisions) and tags are exact-match (no substring bleed). Legacy v1 databases are detected and rejected; migrate them with `python3 migrate_v2.py --db <file> --dry-run` first, then without `--dry-run`. The original v1 table is preserved as `images_legacy`.
 - **Tagging**: The character tag is derived automatically from the `--reference-dir` folder name.
 
 ## Milestones

@@ -37,6 +37,12 @@ EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 # ---------------------------------------------------------------- Database
 class DBManager:
+    """v2 schema: images(path PK, name) + image_tags(path, char) join table.
+
+    v1 stored a comma-separated 'characters' column keyed by basename, which
+    caused silent basename collisions and substring (LIKE '%char%') tag bleed.
+    Run migrate_v2.py on any v1 database first.
+    """
     def __init__(self, db_path):
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path)
@@ -60,86 +66,75 @@ class DBManager:
         with self.conn:
             self._retry_execute(
                 "CREATE TABLE IF NOT EXISTS images ("
-                "name TEXT PRIMARY KEY, "
-                "path TEXT, "
-                "characters TEXT)" # Comma-separated list
+                "path TEXT PRIMARY KEY, "
+                "name TEXT)"
             )
+            self._retry_execute(
+                "CREATE TABLE IF NOT EXISTS image_tags ("
+                "path TEXT NOT NULL, "
+                "char TEXT NOT NULL, "
+                "PRIMARY KEY (path, char))"
+            )
+            self._retry_execute(
+                "CREATE INDEX IF NOT EXISTS idx_tags_char ON image_tags(char)")
+
+    def detect_legacy(self):
+        """True if the images table still uses the v1 'characters' column."""
+        row = self._retry_execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='images'"
+        ).fetchone()
+        return row is not None and "characters" in (row[0] or "").lower()
 
     def register_images(self, image_paths):
-        """Add new images to the database."""
+        """Add new images to the database (keyed by full path)."""
         added = 0
         with self.conn:
             for p in image_paths:
-                name = os.path.basename(p)
-                try:
-                    self._retry_execute(
-                        "INSERT INTO images (name, path, characters) VALUES (?, ?, ?)",
-                        (name, p, "")
-                    )
-                    added += 1
-                except sqlite3.IntegrityError:
-                    pass
+                cur = self._retry_execute(
+                    "INSERT OR IGNORE INTO images (path, name) VALUES (?, ?)",
+                    (p, os.path.basename(p))
+                )
+                added += cur.rowcount
         return added
 
-    def add_character_tag(self, image_name, char_tag):
-        """Add a character tag to an image, avoiding duplicates."""
+    def add_character_tag(self, path, char_tag):
+        """Tag an image with a character (exact match, no duplicates)."""
         with self.conn:
-            row = self._retry_execute(
-                "SELECT characters FROM images WHERE name = ?", (image_name,)
-            ).fetchone()
-            if row:
-                chars = row[0].split(",") if row[0] else []
-                if char_tag not in chars:
-                    chars.append(char_tag)
-                    self._retry_execute(
-                        "UPDATE images SET characters = ? WHERE name = ?",
-                        (",".join(chars), image_name)
-                    )
+            self._retry_execute(
+                "INSERT OR IGNORE INTO image_tags (path, char) VALUES (?, ?)",
+                (path, char_tag)
+            )
 
-    def remove_character_tag(self, image_name, char_tag):
+    def remove_character_tag(self, path, char_tag):
         """Remove a character tag from an image."""
         with self.conn:
-            row = self._retry_execute(
-                "SELECT characters FROM images WHERE name = ?", (image_name,)
-            ).fetchone()
-            if row:
-                chars = row[0].split(",") if row[0] else []
-                if char_tag in chars:
-                    chars.remove(char_tag)
-                    self._retry_execute(
-                        "UPDATE images SET characters = ? WHERE name = ?",
-                        (",".join(chars), image_name)
-                    )
+            self._retry_execute(
+                "DELETE FROM image_tags WHERE path = ? AND char = ?",
+                (path, char_tag)
+            )
 
     def purge_character(self, char_tag):
         """Remove a specific character tag from all images in the database."""
         with self.conn:
-            cursor = self._retry_execute("SELECT name, characters FROM images")
-            all_rows = cursor.fetchall()
-            updated = 0
-            for name, characters in all_rows:
-                chars = characters.split(",") if characters else []
-                if char_tag in chars:
-                    chars.remove(char_tag)
-                    self._retry_execute(
-                        "UPDATE images SET characters = ? WHERE name = ?",
-                        (",".join(chars), name)
-                    )
-                    updated += 1
-        return updated
+            cur = self._retry_execute(
+                "DELETE FROM image_tags WHERE char = ?", (char_tag,))
+            return cur.rowcount
 
     def get_all_images(self):
-        cursor = self._retry_execute("SELECT name, path FROM images")
-        return cursor.fetchall()
+        cur = self._retry_execute("SELECT path, name FROM images")
+        return cur.fetchall()
 
     def prune_missing(self):
         """Remove entries from DB if the file no longer exists on disk."""
         all_imgs = self.get_all_images()
         removed = 0
         with self.conn:
-            for name, path in all_imgs:
+            for path, _name in all_imgs:
                 if not os.path.exists(path):
-                    self._retry_execute("DELETE FROM images WHERE name = ?", (name,))
+                    self._retry_execute(
+                        "DELETE FROM image_tags WHERE path = ?", (path,))
+                    self._retry_execute(
+                        "DELETE FROM images WHERE path = ?", (path,))
                     removed += 1
         return removed
 
@@ -292,8 +287,8 @@ def main():
     ap.add_argument("--clip-min", type=float, default=0.6)
     ap.add_argument("--clip-region", choices=["head", "person"], default="head")
     ap.add_argument("--clip-model", default="openai/clip-vit-large-patch14")
-    ap.add_argument("--save-crops", action="store_true")
     ap.add_argument("--clean", action="store_true", help="Prune missing images from DB")
+    ap.add_argument("--yes", action="store_true", help="Skip --clean confirmation (for scripts)")
     ap.add_argument("--refresh", action="store_true", help="Purge existing tags for the character before grounding")
     
     args = ap.parse_args()
@@ -301,16 +296,27 @@ def main():
     ref_dir = os.path.abspath(args.reference_dir)
     # removed strict reference-dir path check to allow external reference directories
 
+    char_tag = os.path.basename(os.path.normpath(ref_dir))
     db_path = os.path.join(base, f"{args.title}.sql")
     db = DBManager(db_path)
+    if db.detect_legacy():
+        sys.exit(f"ERROR: {db_path} uses the legacy v1 schema (comma-separated "
+                 "'characters' column keyed by basename).\n"
+                 f"Run: python3 migrate_v2.py --db {db_path} --dry-run  (then without --dry-run)")
 
     if args.clean:
         print("Cleaning database...")
-        confirm = input("WARNING: This will delete entries for images no longer on disk. Proceed? (y/N): ")
-        if confirm.lower() == 'y':
+        if sys.stdin.isatty() and not args.yes:
+            confirm = input("WARNING: This will delete entries for images no longer on disk. Proceed? (y/N): ")
+            ok = confirm.lower() == 'y'
+        else:
+            ok = bool(args.yes)
+            if not ok:
+                print("Non-interactive mode without --yes; skipping cleanup.")
+        if ok:
             removed = db.prune_missing()
             print(f"Removed {removed} stale entries.")
-        else:
+        elif sys.stdin.isatty():
             print("Cleanup cancelled.")
 
     os.makedirs(args.output, exist_ok=True)
@@ -332,15 +338,13 @@ def main():
     n_ref = len(ref_feats)
 
     if args.refresh:
-        char_to_refresh = char_names[0] # Usually the only one in reference_dir
-        print(f"Refreshing identity index for {char_to_refresh}...")
-        removed = db.purge_character(char_to_refresh)
-        print(f"Removed {removed} existing tags for {char_to_refresh}.")
+        print(f"Refreshing identity index for {char_tag}...")
+        removed = db.purge_character(char_tag)
+        print(f"Removed {removed} existing tags for {char_tag}.")
 
     print("Updating identity index...")
     input_imgs = list_images(args.input, args.recursive)
-    ref_imgs = list_images(ref_dir, recursive=False)
-    
+
     added_input = db.register_images(input_imgs)
     # Reference images are used for anchors but should not be processed as input images
     print(f"Registered {added_input} input images. (Reference images are used as anchors only)")
@@ -358,12 +362,16 @@ def main():
         sys.exit("No images found in database to process.")
     
     print(f"Processing {len(all_db_images)} images from database")
-    results_path = os.path.join(args.output, "results.jsonl")
+    results_path = os.path.join(args.output, f"results_{char_tag}.jsonl")
     counts = {"MATCH": 0, "DIST_FAIL": 0, "CLIP_FAIL": 0, "CLIP_ERROR": 0, "LOAD_ERROR": 0}
     clip_error_shown = False
 
+    def write_rec(fh, rec):
+        fh.write(json.dumps(rec) + "\n")
+        fh.flush()
+
     with open(results_path, "w") as log:
-        for img_name, path in tqdm(all_db_images):
+        for path, img_name in tqdm(all_db_images):
             rec = {"image": path, "matches": [], "crops": []}
             try:
                 img = load_rgb(path)
@@ -377,7 +385,7 @@ def main():
                 rec["status"] = "LOAD_ERROR"
                 rec["error"] = repr(e)
                 counts["LOAD_ERROR"] += 1
-                log.write(json.dumps(rec) + "\\n")
+                write_rec(log, rec)
                 continue
 
             best_per_char = {}
@@ -401,7 +409,7 @@ def main():
             if not best_per_char:
                 rec["status"] = "DIST_FAIL"
                 counts["DIST_FAIL"] += 1
-                log.write(json.dumps(rec) + "\\n")
+                write_rec(log, rec)
                 continue
 
             any_match = False
@@ -434,7 +442,7 @@ def main():
                 m["status"] = "MATCH"
                 statuses.append("MATCH")
                 any_match = True
-                db.add_character_tag(img_name, name)
+                db.add_character_tag(path, name)
                 
                 rec["matches"].append(m)
 
@@ -445,9 +453,9 @@ def main():
             else:
                 rec["status"] = "CLIP_FAIL"
             counts[rec["status"]] += 1
-            log.write(json.dumps(rec) + "\\n")
+            write_rec(log, rec)
 
-    print("\\nDone.")
+    print("\nDone.")
     for k, v in counts.items():
         print(f"  {k:<11} {v}")
     print(f"Log: {results_path}")
