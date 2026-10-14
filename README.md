@@ -60,7 +60,6 @@ The `nichijou.sql` database will now track which images contain Mai, Mio, or bot
 | `--clip-min` | No | Required P(YES) for each pair (default: 0.6) |
 | `--clip-region` | No | `head` or `person` (default: `head`) |
 | `--clip-model` | No | HF CLIP model path |
-| `--save-crops` | No | Save the matched crop to output |
 | `--clean` | No | Prune images no longer on disk from the database |
 | `--refresh` | No | Purge existing tags for the character before grounding |
 

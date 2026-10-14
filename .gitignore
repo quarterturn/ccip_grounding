@@ -1,4 +1,17 @@
+# Data & databases (never commit)
+*.sql
+*.db
+*.zip
 input
 output
 reference
+
+# Python
+__pycache__/
+venv/
+.venv/
+*.bak
+
+# Logs & caches
 *.log
+*.pkl

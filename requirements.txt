@@ -1,0 +1,14 @@
+# Core (versions match the working venv on homeassistant/.80, Python 3.13)
+dghs-imgutils==0.19.0
+numpy>=2.5
+pillow>=12.3
+tqdm>=4.70
+
+# CLIP attribute gate (ccip_grounder.py --clip-pair)
+torch>=2.14
+transformers>=5.17
+
+# ONNX runtime: install onnxruntime-gpu matching your CUDA, or plain onnxruntime for CPU.
+# The .80 box uses onnxruntime-gpu 1.28.x dev + onnxruntime 1.30.0 with CUDA 13.3
+# (see run_grounder.sh LD_LIBRARY_PATH).
+onnxruntime>=1.30
