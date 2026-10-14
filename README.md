@@ -86,3 +86,15 @@ The `nichijou.sql` database will now track which images contain Mai, Mio, or bot
 - [x] **Milestone 1.5**: Head-region matching and CLIP attribute verification.
 - [x] **Milestone 2**: GPU acceleration.
 - [x] **Milestone 3**: Persistent SQLite identity indexing and automated character tagging.
+- [x] **Milestone 4**: v2 path-keyed schema, batched pipeline, pure-logic test suite.
+
+## Testing
+Pure-logic tests (no GPU, models, or datasets required; needs numpy):
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+They cover scoring (topk mean-of-k selection), CLIP pair parsing, max-min
+diversity sampling, the v2 DB layer (path keying, tag semantics, legacy
+rejection), the migration script, and the hard-cap pruner.
