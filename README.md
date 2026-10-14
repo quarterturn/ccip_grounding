@@ -74,6 +74,8 @@ The `nichijou.sql` database will now track which images contain Mai, Mio, or bot
 
 ## Technical Notes
 - **Identity model**: CCIP (ONNX). Distance metric is a learned difference, not cosine distance.
+- **Batched extraction**: `--batch-size` groups crops into one ONNX forward pass. Measured on .80 (48 stills, 100 refs, RTX 3090): throughput is roughly neutral vs per-crop extraction because person detection dominates runtime, not CCIP. Kept because it reduces per-image Python/ONNX call overhead and scales better with larger reference sets.
+- **Batched vs per-image numerics**: ONNX float accumulation order varies with batch shape. Measured end-to-end drift: max ~6e-05 in CCIP distance, zero status flips across test sets. If you ever set thresholds with margins smaller than ~1e-4, run with `--batch-size 1` for reproducibility.
 - **Persistence**: Uses SQLite to avoid redundant scans and allow multi-character identity layering.
 - **Schema (v2)**: `images(path PRIMARY KEY, name)` plus an `image_tags(path, char)` join table. Paths are the key (no basename collisions) and tags are exact-match (no substring bleed). Legacy v1 databases are detected and rejected; migrate them with `python3 migrate_v2.py --db <file> --dry-run` first, then without `--dry-run`. The original v1 table is preserved as `images_legacy`.
 - **Tagging**: The character tag is derived automatically from the `--reference-dir` folder name.

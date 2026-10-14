@@ -245,7 +245,10 @@ def main():
                     help="Pin all GPU work (ONNX + CLIP) to this GPU ID "
                          "(sets CUDA_VISIBLE_DEVICES before any model loads)")
     ap.add_argument("--batch-size", type=int, default=32,
-                    help="Images per batched CCIP extraction/difference call (default: 32)")
+                    help="Images loaded/detected per batch (default: 32)")
+    ap.add_argument("--max-crops", type=int, default=16,
+                    help="Max crops per batched CCIP ONNX call; bounds GPU "
+                         "activation memory (default: 16; 83 OOMed ~8GB on a 3090)")
 
     args = ap.parse_args()
 
@@ -423,53 +426,80 @@ def main():
             if not batch_items:
                 continue
 
-            # Stage 2: ONE batched CCIP extraction for every crop in the batch
-            all_crops = [c for _p, cs in batch_items for c in cs]
+            def log_error(path, e):
+                rec = {"image": path, "matches": [], "crops": [],
+                       "status": "LOAD_ERROR", "error": repr(e)}
+                counts["LOAD_ERROR"] += 1
+                write_rec(log, rec)
+
+            # Flatten crops: flat[j] = (image_index, crop)
+            flat = [(i, c) for i, (_p, cs) in enumerate(batch_items) for c in cs]
             crop_imgs = [head_crop(c[2], 0.25) if args.ccip_region == "head" else c[2]
-                         for c in all_crops]
-            try:
-                crop_feats = [np.asarray(f) for f in
-                              ccip_batch_extract_features(crop_imgs)]
-            except Exception as e:
-                # batched extraction failed (e.g. one bad crop): fall back to
-                # per-image processing so only the truly broken image errors
-                crop_feats = None
-            if crop_feats is None:
-                for path, crops in batch_items:
-                    try:
-                        crop_feats_i = [np.asarray(ccip_extract_feature(
-                            head_crop(c[2], 0.25) if args.ccip_region == "head" else c[2]))
-                            for c in crops]
-                        full = np.asarray(ccip_batch_differences(ref_feats + crop_feats_i))
-                        diffs = full[n_ref:, :n_ref]
-                    except Exception as e2:
-                        rec = {"image": path, "matches": [], "crops": [],
-                               "status": "LOAD_ERROR", "error": repr(e2)}
-                        counts["LOAD_ERROR"] += 1
-                        write_rec(log, rec)
-                        continue
-                    score_and_log(log, path, crops, diffs)
-                continue
+                         for _i, c in flat]
 
-            # Stage 3: ONE difference matrix for the whole batch
-            try:
-                full = np.asarray(ccip_batch_differences(ref_feats + crop_feats))
-                diffs = full[n_ref:, :n_ref]
-            except Exception as e:
-                # whole-batch diff failed: log all batch images as errors
-                for path, _cs in batch_items:
-                    rec = {"image": path, "matches": [], "crops": [],
-                           "status": "LOAD_ERROR", "error": repr(e)}
-                    counts["LOAD_ERROR"] += 1
-                    write_rec(log, rec)
-                continue
+            # Stage 2: batched CCIP extraction, chunked by CROP COUNT so ONNX
+            # activation memory stays bounded (a 384px attention batch of N
+            # crops costs ~N x the single-crop buffer).
+            feats = [None] * len(flat)
+            failed_imgs = set()
+            for cs_start in range(0, len(flat), args.max_crops):
+                idxs = list(range(cs_start, min(cs_start + args.max_crops, len(flat))))
+                chunk = [crop_imgs[i] for i in idxs]
+                try:
+                    for i, f in zip(idxs, ccip_batch_extract_features(chunk)):
+                        feats[i] = np.asarray(f)
+                except Exception as e:
+                    # chunk too big / one bad crop: retry those crops one by one
+                    print(f"\nWARNING: batched extraction failed "
+                          f"({e!r}); retrying chunk per-crop.")
+                    for i, ci in zip(idxs, chunk):
+                        try:
+                            feats[i] = np.asarray(ccip_extract_feature(ci))
+                        except Exception as e2:
+                            failed_imgs.add(flat[i][0])
+                            log_error(batch_items[flat[i][0]][0], e2)
 
-            # Stage 4: split the matrix back per image
-            off = 0
-            for path, crops in batch_items:
-                n = len(crops)
-                score_and_log(log, path, crops, diffs[off:off + n])
-                off += n
+            # Stage 3: differences vs references, chunked by crop count.
+            # diffs[j] aligns with flat[j].
+            diffs = [None] * len(flat)
+            for cs_start in range(0, len(flat), args.max_crops):
+                idxs = [j for j in range(cs_start,
+                                         min(cs_start + args.max_crops, len(flat)))
+                        if feats[j] is not None]
+                if not idxs:
+                    continue
+                try:
+                    full = np.asarray(ccip_batch_differences(
+                        ref_feats + [feats[j] for j in idxs]))
+                    block = full[n_ref:, :n_ref]
+                    for row, j in enumerate(idxs):
+                        diffs[j] = block[row]
+                except Exception as e:
+                    # fall back per image for this chunk
+                    for j in idxs:
+                        i_img = flat[j][0]
+                        if i_img in failed_imgs:
+                            continue
+                        img_idx_in_flat = [k for k in range(len(flat))
+                                           if flat[k][0] == i_img]
+                        try:
+                            full = np.asarray(ccip_batch_differences(
+                                ref_feats + [feats[k] for k in img_idx_in_flat]))
+                            block = full[n_ref:, :n_ref]
+                            for row, k in enumerate(img_idx_in_flat):
+                                diffs[k] = block[row]
+                        except Exception as e2:
+                            failed_imgs.add(i_img)
+                            log_error(batch_items[i_img][0], e2)
+
+            # Stage 4: score + CLIP-gate each surviving image
+            for i, (path, crops) in enumerate(batch_items):
+                if i in failed_imgs or any(
+                        diffs[j] is None for j in range(len(flat)) if flat[j][0] == i):
+                    continue
+                img_diffs = np.stack([diffs[j] for j in range(len(flat))
+                                      if flat[j][0] == i])
+                score_and_log(log, path, crops, img_diffs)
 
     print("\nDone.")
     for k, v in counts.items():
