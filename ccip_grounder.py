@@ -290,8 +290,16 @@ def main():
     ap.add_argument("--clean", action="store_true", help="Prune missing images from DB")
     ap.add_argument("--yes", action="store_true", help="Skip --clean confirmation (for scripts)")
     ap.add_argument("--refresh", action="store_true", help="Purge existing tags for the character before grounding")
-    
+    ap.add_argument("--gpu", type=int, default=None,
+                    help="Pin all GPU work (ONNX + CLIP) to this GPU ID "
+                         "(sets CUDA_VISIBLE_DEVICES before any model loads)")
+
     args = ap.parse_args()
+
+    # Must happen before onnxruntime/torch create a CUDA context.
+    if args.gpu is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+        print(f"Pinning GPU work to physical GPU {args.gpu}")
 
     ref_dir = os.path.abspath(args.reference_dir)
     # removed strict reference-dir path check to allow external reference directories

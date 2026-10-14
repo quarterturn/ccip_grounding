@@ -69,6 +69,7 @@ The `nichijou.sql` database will now track which images contain Mai, Mio, or bot
 | `--clean` | No | Prune images no longer on disk from the database |
 | `--yes` | No | Skip the `--clean` confirmation prompt (for scripted runs) |
 | `--refresh` | No | Purge existing tags for the character before grounding |
+| `--gpu` | No | Pin ONNX + CLIP to a physical GPU ID (e.g. `--gpu 1`) |
 
 ## Technical Notes
 - **Identity model**: CCIP (ONNX). Distance metric is a learned difference, not cosine distance.
