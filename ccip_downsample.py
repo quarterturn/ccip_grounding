@@ -5,45 +5,18 @@ Reduces a large set of grounded images to a balanced, diverse subset per charact
 Uses Max-Min distance sampling to ensure maximum visual variety.
 """
 import argparse
-import sqlite3
-import os
 import numpy as np
-from pathlib import Path
 from tqdm import tqdm
-from imgutils.detect import detect_person, detect_heads
-from imgutils.metrics import ccip_extract_feature, ccip_default_threshold
+from imgutils.metrics import ccip_extract_feature
+from common import load_rgb, head_crop
 from dbutil import open_v2, distinct_chars
-
-def load_rgb(path):
-    from PIL import Image
-    img = Image.open(path)
-    if img.mode in ("RGBA", "LA", "P"):
-        img = img.convert("RGBA")
-        bg = Image.new("RGB", img.size, (255, 255, 255))
-        bg.paste(img, mask=img.split()[-1])
-        return bg
-    return img.convert("RGB")
-
-def get_best_crop(img, region='head'):
-    # Use the same cropping logic as the grounder for consistency
-    if region == 'head':
-        heads = detect_heads(img)
-        if not heads: return img
-        box, _, _ = max(heads, key=lambda d: d[2])
-        w, h = img.size
-        # Simple pad
-        bw, bh = box[2]-box[0], box[3]-box[1]
-        x0, y0, x1, y1 = box
-        return img.crop((max(0, int(x0-bw*0.25)), max(0, int(y0-bh*0.25)), 
-                        min(w, int(x1+bw*0.25)), min(h, int(y1+bh*0.25))))
-    return img
 
 def extract_feature(path, region='head'):
     try:
         img = load_rgb(path)
-        crop = get_best_crop(img, region)
+        crop = head_crop(img, 0.25) if region == 'head' else img
         return np.asarray(ccip_extract_feature(crop))
-    except Exception as e:
+    except Exception:
         return None
 
 def max_min_sample(features, target_count):

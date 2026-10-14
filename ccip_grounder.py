@@ -23,17 +23,15 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 from tqdm import tqdm
 
-from imgutils.detect import detect_person, detect_heads
 from imgutils.metrics import (
     ccip_extract_feature,
+    ccip_batch_extract_features,
     ccip_batch_differences,
     ccip_default_threshold,
 )
-
-EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+from common import EXTS, list_images, load_rgb, pad_box, person_crops, head_crop
 
 # ---------------------------------------------------------------- Database
 class DBManager:
@@ -142,54 +140,7 @@ class DBManager:
         self.conn.close()
 
 # ---------------------------------------------------------------- utilities
-def list_images(directory, recursive):
-    if not os.path.isdir(directory):
-        return []
-    out = []
-    if recursive:
-        for root, _, files in os.walk(directory):
-            out += [os.path.join(root, f) for f in files
-                    if os.path.splitext(f)[1].lower() in EXTS]
-    else:
-        out = [os.path.join(directory, f) for f in os.listdir(directory)
-               if os.path.splitext(f)[1].lower() in EXTS
-               and os.path.isfile(os.path.join(directory, f))]
-    return sorted(out)
-
-def load_rgb(path):
-    img = Image.open(path)
-    if img.mode in ("RGBA", "LA", "P"):
-        img = img.convert("RGBA")
-        bg = Image.new("RGB", img.size, (255, 255, 255))
-        bg.paste(img, mask=img.split()[-1])
-        return bg
-    return img.convert("RGB")
-
-def pad_box(box, w, h, pad):
-    x0, y0, x1, y1 = box
-    bw, bh = x1 - x0, y1 - y0
-    return (max(0, int(x0 - bw * pad)), max(0, int(y0 - bh * pad)),
-            min(w, int(x1 + bw * pad)), min(h, int(y1 + bh * pad)))
-
-def person_crops(img, conf, pad, min_size):
-    w, h = img.size
-    crops = []
-    for box, _label, score in detect_person(img, conf_threshold=conf):
-        b = pad_box(box, w, h, pad)
-        if min(b[2] - b[0], b[3] - b[1]) < min_size:
-            continue
-        crops.append((b, float(score), img.crop(b)))
-    if not crops:
-        crops.append(((0, 0, w, h), 0.0, img))
-    return crops
-
-def head_crop(crop, pad):
-    heads = detect_heads(crop)
-    if not heads:
-        return crop
-    box, _label, _score = max(heads, key=lambda d: d[2])
-    w, h = crop.size
-    return crop.crop(pad_box(box, w, h, pad))
+# (list_images, load_rgb, pad_box, person_crops, head_crop live in common.py)
 
 # ---------------------------------------------------------------- references
 def build_anchors(ref_dir, cache_path, crop_refs, det_conf, pad, ccip_region):
@@ -293,6 +244,8 @@ def main():
     ap.add_argument("--gpu", type=int, default=None,
                     help="Pin all GPU work (ONNX + CLIP) to this GPU ID "
                          "(sets CUDA_VISIBLE_DEVICES before any model loads)")
+    ap.add_argument("--batch-size", type=int, default=32,
+                    help="Images per batched CCIP extraction/difference call (default: 32)")
 
     args = ap.parse_args()
 
@@ -378,90 +331,145 @@ def main():
         fh.write(json.dumps(rec) + "\n")
         fh.flush()
 
+    def score_and_log(log, path, crops, diffs):
+        """Threshold/CLIP-gate one image's crops against the ref matrix."""
+        nonlocal clip_error_shown
+        best_per_char = {}
+        rec = {"image": path, "matches": [], "crops": []}
+        for k, (box, det_score, _crop) in enumerate(crops):
+            char_scores = []
+            for ci in range(len(char_names)):
+                d = np.sort(diffs[k, ref_owner == ci])
+                char_scores.append(float(d[:max(1, min(args.topk, len(d)))].mean()))
+
+            ci_best = int(np.argmin(char_scores))
+            s_best = char_scores[ci_best]
+            nearest = int(np.argmin(diffs[k]))
+
+            rec["crops"].append({"box": list(box), "det_score": det_score,
+                                 "best_char": char_names[ci_best], "ccip_diff": s_best,
+                                 "nearest_ref": os.path.basename(ref_paths[nearest])})
+            if s_best <= threshold:
+                if ci_best not in best_per_char or s_best < best_per_char[ci_best][0]:
+                    best_per_char[ci_best] = (s_best, k)
+
+        if not best_per_char:
+            rec["status"] = "DIST_FAIL"
+            counts["DIST_FAIL"] += 1
+            write_rec(log, rec)
+            return
+
+        any_match = False
+        statuses = []
+        for ci, (score, k) in best_per_char.items():
+            name = char_names[ci]
+            box, _ds, crop = crops[k]
+            m = {"char": name, "box": list(box), "ccip_diff": score}
+
+            if clip:
+                region = head_crop(crop, 0.25) if args.clip_region == "head" else crop
+                try:
+                    probs = clip.score(region)
+                except Exception as e:
+                    if not clip_error_shown:
+                        traceback.print_exc()
+                        clip_error_shown = True
+                    m["status"] = "CLIP_ERROR"
+                    m["error"] = repr(e)
+                    statuses.append("CLIP_ERROR")
+                    rec["matches"].append(m)
+                    continue
+                m["clip"] = {yes: p for (yes, _no), p in zip(pairs, probs)}
+                if min(probs) < args.clip_min:
+                    m["status"] = "CLIP_FAIL"
+                    statuses.append("CLIP_FAIL")
+                    rec["matches"].append(m)
+                    continue
+
+            m["status"] = "MATCH"
+            statuses.append("MATCH")
+            any_match = True
+            db.add_character_tag(path, name)
+
+            rec["matches"].append(m)
+
+        if any_match:
+            rec["status"] = "MATCH"
+        elif "CLIP_ERROR" in statuses:
+            rec["status"] = "CLIP_ERROR"
+        else:
+            rec["status"] = "CLIP_FAIL"
+        counts[rec["status"]] += 1
+        write_rec(log, rec)
+
     with open(results_path, "w") as log:
-        for path, img_name in tqdm(all_db_images):
-            rec = {"image": path, "matches": [], "crops": []}
+        for bstart in tqdm(range(0, len(all_db_images), args.batch_size),
+                           desc="batches"):
+            batch = all_db_images[bstart:bstart + args.batch_size]
+
+            # Stage 1: load + detect per image (failures isolated per image)
+            batch_items = []  # (path, crops)
+            for path, img_name in batch:
+                try:
+                    img = load_rgb(path)
+                    crops = person_crops(img, args.det_conf, args.pad, args.min_crop)
+                    batch_items.append((path, crops))
+                except Exception as e:
+                    rec = {"image": path, "matches": [], "crops": [],
+                           "status": "LOAD_ERROR", "error": repr(e)}
+                    counts["LOAD_ERROR"] += 1
+                    write_rec(log, rec)
+
+            if not batch_items:
+                continue
+
+            # Stage 2: ONE batched CCIP extraction for every crop in the batch
+            all_crops = [c for _p, cs in batch_items for c in cs]
+            crop_imgs = [head_crop(c[2], 0.25) if args.ccip_region == "head" else c[2]
+                         for c in all_crops]
             try:
-                img = load_rgb(path)
-                crops = person_crops(img, args.det_conf, args.pad, args.min_crop)
-                crop_feats = [np.asarray(ccip_extract_feature(
-                    head_crop(c[2], 0.25) if args.ccip_region == "head" else c[2]))
-                    for c in crops]
+                crop_feats = [np.asarray(f) for f in
+                              ccip_batch_extract_features(crop_imgs)]
+            except Exception as e:
+                # batched extraction failed (e.g. one bad crop): fall back to
+                # per-image processing so only the truly broken image errors
+                crop_feats = None
+            if crop_feats is None:
+                for path, crops in batch_items:
+                    try:
+                        crop_feats_i = [np.asarray(ccip_extract_feature(
+                            head_crop(c[2], 0.25) if args.ccip_region == "head" else c[2]))
+                            for c in crops]
+                        full = np.asarray(ccip_batch_differences(ref_feats + crop_feats_i))
+                        diffs = full[n_ref:, :n_ref]
+                    except Exception as e2:
+                        rec = {"image": path, "matches": [], "crops": [],
+                               "status": "LOAD_ERROR", "error": repr(e2)}
+                        counts["LOAD_ERROR"] += 1
+                        write_rec(log, rec)
+                        continue
+                    score_and_log(log, path, crops, diffs)
+                continue
+
+            # Stage 3: ONE difference matrix for the whole batch
+            try:
                 full = np.asarray(ccip_batch_differences(ref_feats + crop_feats))
                 diffs = full[n_ref:, :n_ref]
             except Exception as e:
-                rec["status"] = "LOAD_ERROR"
-                rec["error"] = repr(e)
-                counts["LOAD_ERROR"] += 1
-                write_rec(log, rec)
+                # whole-batch diff failed: log all batch images as errors
+                for path, _cs in batch_items:
+                    rec = {"image": path, "matches": [], "crops": [],
+                           "status": "LOAD_ERROR", "error": repr(e)}
+                    counts["LOAD_ERROR"] += 1
+                    write_rec(log, rec)
                 continue
 
-            best_per_char = {}
-            for k, (box, det_score, _crop) in enumerate(crops):
-                char_scores = []
-                for ci in range(len(char_names)):
-                    d = np.sort(diffs[k, ref_owner == ci])
-                    char_scores.append(float(d[:max(1, min(args.topk, len(d)))].mean()))
-                
-                ci_best = int(np.argmin(char_scores))
-                s_best = char_scores[ci_best]
-                nearest = int(np.argmin(diffs[k]))
-                
-                rec["crops"].append({"box": list(box), "det_score": det_score,
-                                     "best_char": char_names[ci_best], "ccip_diff": s_best,
-                                     "nearest_ref": os.path.basename(ref_paths[nearest])})
-                if s_best <= threshold:
-                    if ci_best not in best_per_char or s_best < best_per_char[ci_best][0]:
-                        best_per_char[ci_best] = (s_best, k)
-
-            if not best_per_char:
-                rec["status"] = "DIST_FAIL"
-                counts["DIST_FAIL"] += 1
-                write_rec(log, rec)
-                continue
-
-            any_match = False
-            statuses = []
-            for ci, (score, k) in best_per_char.items():
-                name = char_names[ci]
-                box, _ds, crop = crops[k]
-                m = {"char": name, "box": list(box), "ccip_diff": score}
-
-                if clip:
-                    region = head_crop(crop, 0.25) if args.clip_region == "head" else crop
-                    try:
-                        probs = clip.score(region)
-                    except Exception as e:
-                        if not clip_error_shown:
-                            traceback.print_exc()
-                            clip_error_shown = True
-                        m["status"] = "CLIP_ERROR"
-                        m["error"] = repr(e)
-                        statuses.append("CLIP_ERROR")
-                        rec["matches"].append(m)
-                        continue
-                    m["clip"] = {yes: p for (yes, _no), p in zip(pairs, probs)}
-                    if min(probs) < args.clip_min:
-                        m["status"] = "CLIP_FAIL"
-                        statuses.append("CLIP_FAIL")
-                        rec["matches"].append(m)
-                        continue
-
-                m["status"] = "MATCH"
-                statuses.append("MATCH")
-                any_match = True
-                db.add_character_tag(path, name)
-                
-                rec["matches"].append(m)
-
-            if any_match:
-                rec["status"] = "MATCH"
-            elif "CLIP_ERROR" in statuses:
-                rec["status"] = "CLIP_ERROR"
-            else:
-                rec["status"] = "CLIP_FAIL"
-            counts[rec["status"]] += 1
-            write_rec(log, rec)
+            # Stage 4: split the matrix back per image
+            off = 0
+            for path, crops in batch_items:
+                n = len(crops)
+                score_and_log(log, path, crops, diffs[off:off + n])
+                off += n
 
     print("\nDone.")
     for k, v in counts.items():

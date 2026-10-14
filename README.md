@@ -7,7 +7,7 @@ The system finds a specific character in a collection of images by comparing the
 
 For each input image:
 1. Every person in the image is detected and cropped.
-2. Each crop (or just its head, with `--ccip-region head`) is compared against every reference image using **CCIP's learned difference metric**.
+2. Each crop (or just its head, with `--ccip-region head`) is compared against every reference image using **CCIP's learned difference metric**. Crops are extracted in batches (`--batch-size`) for throughput.
 3. The best-matching crop is kept if its difference is at or below the threshold.
 4. Optionally, the matched crop is checked by **CLIP** against one or more yes/no prompt pairs (e.g. glasses vs. no glasses).
 5. Matches are logged to a persistent SQLite database and results are written to `output/` (one `results_<character>.jsonl` per run).
@@ -70,6 +70,7 @@ The `nichijou.sql` database will now track which images contain Mai, Mio, or bot
 | `--yes` | No | Skip the `--clean` confirmation prompt (for scripted runs) |
 | `--refresh` | No | Purge existing tags for the character before grounding |
 | `--gpu` | No | Pin ONNX + CLIP to a physical GPU ID (e.g. `--gpu 1`) |
+| `--batch-size` | No | Images per batched CCIP call (default: 32; use 1 to debug per-image) |
 
 ## Technical Notes
 - **Identity model**: CCIP (ONNX). Distance metric is a learned difference, not cosine distance.
