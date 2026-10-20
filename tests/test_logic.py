@@ -117,8 +117,8 @@ class TestPreferSolo(unittest.TestCase):
 
     def _feats_and_tags(self, n_solo, n_group, seed=0):
         rs = np.random.RandomState(seed)
-        solo = rs.rand(n_solo, 4) * 0.01 + [0, 0]
-        group = rs.rand(n_group, 4) * 0.01 + [100, 100]
+        solo = rs.rand(n_solo, 4) * 0.01 + [0, 0, 0, 0]
+        group = rs.rand(n_group, 4) * 0.01 + [100, 100, 100, 100]
         feats = np.vstack([solo, group])
         n_tags = np.array([1] * n_solo + [2] * n_group)
         return feats, n_tags
