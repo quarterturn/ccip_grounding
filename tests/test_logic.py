@@ -112,6 +112,57 @@ class TestMaxMinSample(unittest.TestCase):
         self.assertEqual(len(sel), 20)
 
 
+class TestPreferSolo(unittest.TestCase):
+    """--prefer-solo: solo pool fills the target first, group shots backfill."""
+
+    def _feats_and_tags(self, n_solo, n_group, seed=0):
+        rs = np.random.RandomState(seed)
+        solo = rs.rand(n_solo, 4) * 0.01 + [0, 0]
+        group = rs.rand(n_group, 4) * 0.01 + [100, 100]
+        feats = np.vstack([solo, group])
+        n_tags = np.array([1] * n_solo + [2] * n_group)
+        return feats, n_tags
+
+    def test_solo_excludes_group_when_solo_fills_target(self):
+        feats, n_tags = self._feats_and_tags(150, 100)
+        sel = ccip_downsample.select_prefer_solo(feats, n_tags, 100)
+        self.assertEqual(len(sel), 100)
+        self.assertTrue(all(n_tags[i] == 1 for i in sel))
+
+    def test_group_backfills_solo_shortfall(self):
+        feats, n_tags = self._feats_and_tags(30, 200)
+        sel = ccip_downsample.select_prefer_solo(feats, n_tags, 100)
+        self.assertEqual(len(sel), 100)
+        self.assertEqual(sum(1 for i in sel if n_tags[i] == 1), 30)
+
+    def test_small_pools_returned_whole(self):
+        feats, n_tags = self._feats_and_tags(10, 8)
+        sel = ccip_downsample.select_prefer_solo(feats, n_tags, 100)
+        self.assertEqual(sorted(sel), list(range(18)))
+
+    def test_no_duplicates_and_capped(self):
+        feats, n_tags = self._feats_and_tags(90, 90, seed=7)
+        sel = ccip_downsample.select_prefer_solo(feats, n_tags, 100)
+        self.assertEqual(len(sel), len(set(sel)))
+        self.assertLessEqual(len(sel), 100)
+
+    def test_group_pool_internally_diverse(self):
+        # backfilled group picks must Max-Min across the group cluster, not
+        # take the first N: seed two sub-clusters inside the group pool.
+        rs = np.random.RandomState(3)
+        solo = rs.rand(5, 2) * 0.01 + [0, 0]
+        gA = rs.rand(50, 2) * 0.01 + [100, 100]
+        gB = rs.rand(50, 2) * 0.01 + [200, 200]
+        feats = np.vstack([solo, gA, gB])
+        n_tags = np.array([1] * 5 + [2] * 100)
+        sel = ccip_downsample.select_prefer_solo(feats, n_tags, 55)
+        grp = [i - 5 for i in sel if n_tags[i] > 1]
+        in_A = sum(1 for i in grp if i < 50)
+        in_B = sum(1 for i in grp if i >= 50)
+        self.assertGreater(in_A, 0)
+        self.assertGreater(in_B, 0)
+
+
 class TestDBManager(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sql", delete=False)
