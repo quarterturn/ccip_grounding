@@ -15,3 +15,6 @@ venv/
 # Logs & caches
 *.log
 *.pkl
+
+.venv-gpu/
+anchors.json
