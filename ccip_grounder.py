@@ -265,7 +265,15 @@ def main():
                          "activation memory (default: 8; measured fastest on "
                          ".80, 83 crops OOMed ~8GB on a 3090)")
 
+    ap.add_argument("--ov-gpu", action="store_true",
+                    help="Run all ONNX models (CCIP + detectors) on the Intel "
+                         "iGPU via OpenVINO device_type=GPU (chibi; loud CPU "
+                         "fallback per model on compile failure)")
     args = ap.parse_args()
+
+    if args.ov_gpu:
+        import ovpatch
+        ovpatch.enable_if_requested(cli_flag=True)
 
     # Must happen before onnxruntime/torch create a CUDA context.
     if args.gpu is not None:

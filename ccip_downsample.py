@@ -77,7 +77,14 @@ def main():
                              "binding for LoRA training).")
     parser.add_argument("--gpu", type=int, default=None,
                         help="Physical GPU index to pin to (sets CUDA_VISIBLE_DEVICES before any model loads).")
+    parser.add_argument("--ov-gpu", action="store_true",
+                        help="Run ONNX models on the Intel iGPU via OpenVINO "
+                             "device_type=GPU (chibi; loud CPU fallback).")
     args = parser.parse_args()
+
+    if args.ov_gpu:
+        import ovpatch
+        ovpatch.enable_if_requested(cli_flag=True)
 
     if args.gpu is not None:
         import os

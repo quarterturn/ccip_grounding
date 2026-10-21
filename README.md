@@ -98,3 +98,20 @@ python3 -m unittest discover -s tests -v
 They cover scoring (topk mean-of-k selection), CLIP pair parsing, max-min
 diversity sampling, the v2 DB layer (path keying, tag semantics, legacy
 rejection), the migration script, and the hard-cap pruner.
+
+## chibi iGPU route (branch feat/igpu-ov)
+
+Grounding runs on chibi's i3-N305 iGPU via `ovpatch.py` — an OpenVINO
+facade injected at imgutils' single ONNX entry point (`--ov-gpu` flag or
+`CCIP_OV_GPU=1`; CPU fallback is loud, never silent). Use the python3.12
+venv with `openvino onnx` installed. Do NOT rely on the ORT
+OpenVINOExecutionProvider: it silently runs the detectors on CPU and its
+1.24.1 build miscompiles the dynamic-shape YOLO graphs.
+
+Measured (i3-N305): person detect 131 ms vs 2233 ms CPU; CCIP feat
+231 ms/crop batched vs 544 ms; end-to-end grounding ~3.5x faster.
+Equivalence vs ORT-CPU on 200 stills @0.08: not bit-identical (fp32
+accumulation order differs; max per-image drift 0.040 far from threshold);
+one borderline crop straddled 0.08 (0.0776 vs 0.0806) — expected to
+reappear as borderline noise under either backend. The post-grounding
+audit-sheet gate is the review point for this class.

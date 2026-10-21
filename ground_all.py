@@ -11,14 +11,14 @@ INPUT_DIR = BASE_DIR / 'input'
 VENV_PYTHON = BASE_DIR / 'venv' / 'bin' / 'python3'
 SCRIPT_PATH = BASE_DIR / 'ccip_grounder.py'
 
-def run_grounding(char, title, threshold, gpu_id, extra_args):
+def run_grounding(char, title, threshold, gpu_id, extra_args, python_path=None):
     """Worker function to run grounding for a single character on a specific GPU."""
     separator = '=' * 60
     print(f'\n{separator}\n>>> [GPU {gpu_id}] Grounding character: {char}\n{separator}')
 
     # Construct command
     cmd = [
-        str(VENV_PYTHON),
+        str(python_path or VENV_PYTHON),
         str(SCRIPT_PATH),
         '--title', title,
         '--reference-dir', f'reference/{char}',
@@ -49,6 +49,10 @@ def main():
                         help='List of GPU IDs to distribute characters over (passed as --gpu to the grounder)')
     parser.add_argument('--dry-run', action='store_true',
                         help='Print the planned character/GPU assignments without running anything')
+    parser.add_argument('--python', default=None,
+                        help='Interpreter for ccip_grounder.py (default: venv/bin/python3; '
+                             'chibi iGPU runs use .venv-gpu/bin/python; env CCIP_OV_GPU=1 '
+                             'is inherited by children)')
     parser.add_argument('extra', nargs=argparse.REMAINDER,
                         help='Extra arguments forwarded verbatim to ccip_grounder.py (put after --)')
     args = parser.parse_args()
@@ -75,10 +79,10 @@ def main():
     jobs = []
     for i, char in enumerate(chars):
         gpu_id = args.gpus[i % num_gpus]
-        jobs.append((char, args.title, args.threshold, gpu_id, extra_args))
+        jobs.append((char, args.title, args.threshold, gpu_id, extra_args, args.python))
 
     if args.dry_run:
-        for char, title, threshold, gpu_id, extra in jobs:
+        for char, title, threshold, gpu_id, extra, _py in jobs:
             t = f' --threshold {threshold}' if threshold is not None else ''
             print(f'[dry-run] {char} -> GPU {gpu_id}: ccip_grounder.py --title {title}{t} {" ".join(extra)}')
         print(f'[dry-run] {len(jobs)} jobs planned, nothing executed.')
