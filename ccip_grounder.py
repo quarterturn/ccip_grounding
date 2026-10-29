@@ -13,6 +13,7 @@ Features:
   - --refresh option to purge existing tags for the character before grounding.
 """
 import argparse
+import io
 import json
 import os
 import pickle
@@ -143,6 +144,53 @@ class DBManager:
 # (list_images, load_rgb, pad_box, person_crops, head_crop live in common.py)
 
 # ---------------------------------------------------------------- references
+class FeatCache:
+    """Shared per-image crop-feature cache, reused across character passes.
+
+    Keyed (path, mtime_ns, size, crop-params): a changed image or changed
+    crop settings is simply a miss and recomputes. Stores only detector
+    output (boxes + det scores) and CCIP vectors; matching against a
+    character's references always runs fresh, so verdicts cannot differ
+    from a cacheless run except by model nondeterminism (none: fixed-input
+    ONNX inference). Delete the DB when the detector/CCIP model or the
+    crop logic changes -- nothing here version-checks the models.
+    """
+
+    def __init__(self, db_path):
+        self.conn = sqlite3.connect(db_path, timeout=120)
+        self.conn.execute("PRAGMA busy_timeout=120000")
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS feats ("
+            "path TEXT, key TEXT, mtime INTEGER, size INTEGER, blob BLOB, "
+            "PRIMARY KEY (path, key))")
+        self.conn.commit()
+        self._pending = 0
+
+    def get(self, path, key, mtime, size):
+        row = self.conn.execute(
+            "SELECT blob FROM feats WHERE path=? AND key=? AND mtime=? "
+            "AND size=?", (path, key, mtime, size)).fetchone()
+        if row is None:
+            return None
+        meta, arr = pickle.loads(row[0])
+        return meta, np.load(io.BytesIO(arr), allow_pickle=False)
+
+    def put(self, path, key, mtime, size, meta, feats):
+        buf = io.BytesIO()
+        np.save(buf, feats)
+        self.conn.execute(
+            "INSERT OR REPLACE INTO feats VALUES (?,?,?,?,?)",
+            (path, key, mtime, size, pickle.dumps((meta, buf.getvalue()))))
+        self._pending += 1
+        if self._pending >= 256:
+            self.conn.commit()
+            self._pending = 0
+
+    def close(self):
+        self.conn.commit()
+        self.conn.close()
+
+
 def build_anchors(ref_dir, cache_path, crop_refs, det_conf, pad, ccip_region):
     paths = list_images(ref_dir, recursive=False)
     if not paths:
@@ -248,6 +296,17 @@ def main():
     ap.add_argument("--det-conf", type=float, default=0.3)
     ap.add_argument("--pad", type=float, default=0.1)
     ap.add_argument("--min-crop", type=int, default=64)
+    ap.add_argument("--feat-cache", default=None,
+                    help="Path to a SQLite file caching per-image person "
+                         "crops and their CCIP vectors, shared across "
+                         "character passes. Keyed (path, mtime, size, crop "
+                         "params): changed inputs are automatically a miss "
+                         "and recompute. Only detection+extraction is "
+                         "reused; matching vs the character's references "
+                         "always runs fresh, so verdicts equal a cacheless "
+                         "run. Delete the file if the detector/CCIP model "
+                         "or crop logic changes. Ignored when --clip-pair "
+                         "is active (the CLIP gate needs raw crops).")
     ap.add_argument("--clip-pair", action="append")
     ap.add_argument("--clip-min", type=float, default=0.6)
     ap.add_argument("--clip-region", choices=["head", "person"], default="head")
@@ -336,6 +395,17 @@ def main():
         for yes, no in pairs:
             print(f"  require P('{yes}') >= {args.clip_min}  vs  '{no}'")
 
+    feat_cache = None
+    feat_key = (f"{args.det_conf}|{args.pad}|{args.min_crop}|"
+                f"{args.ccip_region}")
+    if args.feat_cache:
+        if clip is not None:
+            print("NOTE: --feat-cache ignored while --clip-pair is active "
+                  "(the CLIP gate needs raw crops).")
+        else:
+            feat_cache = FeatCache(args.feat_cache)
+            print(f"Feature cache: {args.feat_cache}")
+
     all_db_images = db.get_all_images()
     if not all_db_images:
         sys.exit("No images found in database to process.")
@@ -422,7 +492,23 @@ def main():
 
             # Stage 1: load + detect per image (failures isolated per image)
             batch_items = []  # (path, crops)
+            img_feats = {}    # image index -> cached CCIP vectors (ndarray)
             for path, img_name in batch:
+                if feat_cache is not None:
+                    hit = None
+                    try:
+                        st = os.stat(path)
+                        hit = feat_cache.get(path, feat_key, st.st_mtime_ns,
+                                             st.st_size)
+                    except OSError:
+                        hit = None
+                    if hit is not None:
+                        meta, fmat = hit
+                        batch_items.append(
+                            (path, [(tuple(b), s, None)
+                                    for (b, s) in meta]))
+                        img_feats[len(batch_items) - 1] = fmat
+                        continue
                 try:
                     img = load_rgb(path)
                     crops = person_crops(img, args.det_conf, args.pad, args.min_crop)
@@ -443,7 +529,10 @@ def main():
                 write_rec(log, rec)
 
             # Flatten crops: flat[j] = (image_index, crop)
-            flat = [(i, c) for i, (_p, cs) in enumerate(batch_items) for c in cs]
+            # (cache-hit images carry no crops; their vectors come from the
+            # cache in stage 3b, so they stay out of flat entirely)
+            flat = [(i, c) for i, (_p, cs) in enumerate(batch_items)
+                    if i not in img_feats for c in cs]
             crop_imgs = [head_crop(c[2], 0.25) if args.ccip_region == "head" else c[2]
                          for _i, c in flat]
 
@@ -502,19 +591,55 @@ def main():
                             failed_imgs.add(i_img)
                             log_error(batch_items[i_img][0], e2)
 
+            # Stage 3b: diffs for cache-hit images. The vectors come from
+            # the shared cache; comparison against this character's refs is
+            # always recomputed fresh.
+            cached_diffs = {}
+            if feat_cache is not None:
+                for i, fmat in img_feats.items():
+                    if len(fmat) == 0:
+                        cached_diffs[i] = np.zeros((0, n_ref),
+                                                   dtype=np.float32)
+                        continue
+                    full = np.asarray(
+                        ccip_batch_differences(
+                            ref_feats + [f for f in fmat]))
+                    cached_diffs[i] = full[n_ref:, :n_ref]
+
             # Stage 4: score + CLIP-gate each surviving image
             for i, (path, crops) in enumerate(batch_items):
-                if i in failed_imgs or any(
-                        diffs[j] is None for j in range(len(flat)) if flat[j][0] == i):
-                    continue
-                img_diffs = np.stack([diffs[j] for j in range(len(flat))
-                                      if flat[j][0] == i])
+                if i in img_feats:
+                    img_diffs = cached_diffs[i]
+                else:
+                    if i in failed_imgs or any(
+                            diffs[j] is None for j in range(len(flat))
+                            if flat[j][0] == i):
+                        continue
+                    img_diffs = np.stack([diffs[j]
+                                          for j in range(len(flat))
+                                          if flat[j][0] == i])
                 score_and_log(log, path, crops, img_diffs)
+                if (feat_cache is not None and i not in img_feats
+                        and i not in failed_imgs):
+                    try:
+                        st = os.stat(path)
+                    except OSError:
+                        st = None
+                    if st is not None:
+                        idxs = [j for j in range(len(flat))
+                                if flat[j][0] == i]
+                        fmat = (np.stack([feats[j] for j in idxs]) if idxs
+                                else np.zeros((0, 1), dtype=np.float32))
+                        meta = [(c[0], float(c[1])) for c in crops]
+                        feat_cache.put(path, feat_key, st.st_mtime_ns,
+                                       st.st_size, meta, fmat)
 
     print("\nDone.")
     for k, v in counts.items():
         print(f"  {k:<11} {v}")
     print(f"Log: {results_path}")
+    if feat_cache is not None:
+        feat_cache.close()
     db.close()
 
 if __name__ == "__main__":
