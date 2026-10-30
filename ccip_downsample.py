@@ -54,8 +54,10 @@ def select_prefer_solo(feats, n_tags, target):
     selected = []
     for pool_idx in (solo_idx, group_idx):
         room = target - len(selected)
-        if room <= 0 or len(pool_idx) == 0:
+        if room <= 0:
             break
+        if len(pool_idx) == 0:
+            continue
         if len(pool_idx) <= room:
             selected.extend(pool_idx.tolist())
         else:
