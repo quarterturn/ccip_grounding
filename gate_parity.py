@@ -69,6 +69,10 @@ def parse_args():
     p.add_argument("--min-aspect", type=float, default=0.45)
     p.add_argument("--max-aspect", type=float, default=1.6)
     p.add_argument("--edge-margin", type=int, default=0)
+    p.add_argument("--path-map", action="append", default=[],
+                   metavar="OLD=NEW", help="rewrite corpus paths (repeatable); "
+                   "e.g. /mnt/md0/image-training-datasets="
+                   "/home/alex/Documents/image-training-datasets on .80")
     p.add_argument("--gpu", help="CUDA_VISIBLE_DEVICES pin (e.g. 1)")
     p.add_argument("--device", default="cuda", choices=("cuda", "cpu"))
     p.add_argument("--limit", type=int, default=0)
@@ -156,6 +160,14 @@ def main():
             if os.path.splitext(f)[1].lower() in exts)
     if args.limit:
         paths = paths[: args.limit]
+    for pm in args.path_map:
+        old, new = pm.split("=", 1)
+        paths = [new + p[len(old):] if p.startswith(old) else p
+                 for p in paths]
+    n_remap_missing = sum(1 for p in paths if not os.path.exists(p))
+    if n_remap_missing == len(paths):
+        sys.exit(f"All {len(paths)} corpus paths unreadable from this host "
+                 f"(first: {paths[0]}). Use --path-map for this machine.")
     out = args.out or default_out.rstrip("/") + ""
     os.makedirs(out, exist_ok=True)
     os.makedirs(os.path.join(out, "evidence", "yolo_only"), exist_ok=True)

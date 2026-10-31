@@ -109,7 +109,10 @@ python3 gate_parity.py --images raw_frames --gpu 1
 
 Outputs in `<input>_gate_parity/`: `decisions.csv`, `summary.txt`
 (agreement/recall per threshold), `evidence/{yolo_only,dg_only}/` copies
-of the strongest disagreements, `*_all.txt` full lists. Pin `--gpu 1`
+of the strongest disagreements, `*_all.txt` full lists. Databases carry
+the paths of the machine that built them — on .80 pass
+`--path-map /mnt/md0/image-training-datasets=/home/alex/Documents/image-training-datasets`
+(chibi paths → SMB mount). Pin `--gpu 1`
 before any CUDA-using import; the script warms the CUDA context before
 importing ultralytics (it rewrites `CUDA_VISIBLE_DEVICES` on first
 predict() otherwise and silently lands on GPU0).
