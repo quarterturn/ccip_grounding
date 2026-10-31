@@ -22,6 +22,8 @@ For each input image:
 - `ccip_downsample.py`: Max-min diversity downsampling per character.
 - `ccip_hard_cap.py`: Random pruning to enforce a strict per-character cap.
 - `db_prune.py`: Remove database entries whose files no longer exist on disk.
+- `gate_parity.py`: A/B the facesaver YOLO gate (AGPL) vs the MIT deepghs
+  face detector — gate-decision agreement tables for the product licensing swap.
 - `reference/`: Reference images of target characters. Use subdirectories for each character (e.g. `reference/minakami_mai/`).
 - `input/`: Images to search.
 - `output/`: Matching results, logs, and reference caches.
@@ -80,6 +82,37 @@ The `nichijou.sql` database will now track which images contain Mai, Mio, or bot
 - **Persistence**: Uses SQLite to avoid redundant scans and allow multi-character identity layering.
 - **Schema (v2)**: `images(path PRIMARY KEY, name)` plus an `image_tags(path, char)` join table. Paths are the key (no basename collisions) and tags are exact-match (no substring bleed). Legacy v1 databases are detected and rejected; migrate them with `python3 migrate_v2.py --db <file> --dry-run` first, then without `--dry-run`. The original v1 table is preserved as `images_legacy`.
 - **Tagging**: The character tag is derived automatically from the `--reference-dir` folder name.
+
+## Gate parity harness (`gate_parity.py`) — product detector swap
+
+The product build cannot ship Ultralytics + `yolov8x6_animeface.pt`
+(AGPL-3.0). This harness measures whether the MIT-licensed
+`deepghs/anime_face_detection` model (`face_detect_v1.4_s` via imgutils
+ONNX — the license family the grounding crop stage already uses) makes the
+same frame gate decisions as facesaver. Agreement is measured on gate
+*decisions*: both detectors' boxes pass through facesaver's exact geometry
+gate (min 100px, area 0.5–30%, aspect 0.45–1.6), and both run at the
+production defaults (YOLO conf 0.3, imgsz 1280). DeepGHS runs once at the
+lowest sweep threshold and higher thresholds are re-gated from recorded
+scores — exact, because NMS never lets a low-score box suppress a
+higher-score one. Card-recommended threshold for v1.4_s is 0.307; do NOT
+assume detector confidences transfer — read the sweep.
+
+```bash
+# Keep side: the stills that passed the historical YOLO gate (grounding DB).
+python3 gate_parity.py --db madeinabyss.sql --gpu 1
+
+# Both sides: raw frames that never met a gate (uniform stride sampling:
+# ffmpeg -vf "select=not(mod(n\,125))" -vsync vfr -q:v 3 .../%05d.jpg).
+python3 gate_parity.py --images raw_frames --gpu 1
+```
+
+Outputs in `<input>_gate_parity/`: `decisions.csv`, `summary.txt`
+(agreement/recall per threshold), `evidence/{yolo_only,dg_only}/` copies
+of the strongest disagreements, `*_all.txt` full lists. Pin `--gpu 1`
+before any CUDA-using import; the script warms the CUDA context before
+importing ultralytics (it rewrites `CUDA_VISIBLE_DEVICES` on first
+predict() otherwise and silently lands on GPU0).
 
 ## Milestones
 - [x] **Milestone 1**: Basic grounding functionality implemented.
