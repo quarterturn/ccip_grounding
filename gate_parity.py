@@ -54,6 +54,12 @@ def parse_args():
     p.add_argument("--yolo-iou", type=float, default=0.5)
     p.add_argument("--imgsz", type=int, default=1280,
                    help="production inference size for yolov8x6_animeface")
+    p.add_argument("--detector", default="deepghs",
+                   choices=("deepghs", "hysts"),
+                   help="MIT gate candidate under test: deepghs "
+                        "face_detect_v1.4_s (ONNX/imgutils) or hysts "
+                        "Faster R-CNN (MIT weights, screenshot-domain "
+                        "Kiss23k training)")
     p.add_argument("--dg-level", default="s", choices=("n", "s"),
                    help="deepghs face_detect size (v1.4)")
     p.add_argument("--dg-version", default="v1.4")
@@ -183,9 +189,21 @@ def main():
         import torch
         torch.zeros(1, device="cuda")
     from ultralytics import YOLO
-    from imgutils.detect import detect_faces
     import cv2
     from PIL import Image
+    if args.detector == "deepghs":
+        from imgutils.detect import detect_faces
+        cand = "face_detect_" + args.dg_version + "_" + args.dg_level \
+               + " (MIT, deepghs/anime_face_detection)"
+    else:
+        # internal face-only loader: skip the landmark wrapper entirely
+        from anime_face_detector._face import load_face_detector
+        from anime_face_detector.detector import get_checkpoint_path
+        hf_det = load_face_detector(
+            "faster-rcnn", str(get_checkpoint_path("faster-rcnn")),
+            device="cuda:0" if dev == "cuda" else "cpu")
+        cand = "hysts anime-face-detector faster-rcnn " \
+               "(MIT weights, Kiss23k screenshots domain)"
 
     yolo = YOLO(args.yolo_model)
 
@@ -209,11 +227,17 @@ def main():
                 yboxes.append((xyxy, float(c)))
         y_ok = [s for b, s in yboxes if face_qualifies(b, img.shape, **gk)]
 
-        pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-        dets = detect_faces(pil, level=args.dg_level,
-                            version=args.dg_version,
-                            conf_threshold=min_t)
-        d_scores = [(b, s) for b, _lbl, s in dets
+        if args.detector == "deepghs":
+            pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            dets = detect_faces(pil, level=args.dg_level,
+                                version=args.dg_version,
+                                conf_threshold=min_t)
+            raw_d = [(b, s) for b, _lbl, s in dets]
+        else:
+            raw_d = [((float(b[0]), float(b[1]), float(b[2]), float(b[3])),
+                      float(b[4])) for b in hf_det.detect(img)
+                     if b[4] >= min_t]
+        d_scores = [(b, s) for b, s in raw_d
                     if face_qualifies(b, img.shape, **gk)]
 
         row = {"path": path,
@@ -241,9 +265,8 @@ def main():
     lines = [f"frames={len(rows)} unreadable={n_bad}",
              f"yolo baseline: {args.yolo_model} conf={args.yolo_conf} "
              f"imgsz={args.imgsz} (production facesaver gate params)",
-             f"deepghs: face_detect_{args.dg_version}_{args.dg_level} "
-             f"(MIT, deepghs/anime_face_detection)  "
-             f"card-recommended threshold: 0.307", ""]
+             f"candidate: {cand}  "
+             f"(deepghs card-recommended threshold: 0.307)", ""]
     ykeep = [r["yolo_keep"] for r in rows]
     lines.append(f"YOLO keep rate: {sum(ykeep)}/{len(rows)}")
     lines.append("")
